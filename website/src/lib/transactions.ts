@@ -36,3 +36,42 @@ export function createUnstakeTransaction(stakedIotaId: string) {
     });
     return tx;
 }
+
+export function createRestakeTransaction(
+    stakedIotaId: string,
+    newValidator: string,
+    sender: string,
+) {
+    const tx = new Transaction();
+    tx.setGasBudget(100_000_000); // 0.1 IOTA — covers withdraw + restake
+
+    const systemState = tx.sharedObjectRef({
+        objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+        initialSharedVersion: 1,
+        mutable: true,
+    });
+
+    // Withdraw: returns Balance<IOTA>
+    const balance = tx.moveCall({
+        target: '0x3::iota_system::request_withdraw_stake_non_entry',
+        arguments: [systemState, tx.object(stakedIotaId)],
+    });
+
+    // Convert Balance<IOTA> → Coin<IOTA>
+    const coin = tx.moveCall({
+        target: '0x2::coin::from_balance',
+        typeArguments: ['0x2::iota::IOTA'],
+        arguments: [balance],
+    });
+
+    // Re-stake with new validator → returns StakedIota
+    const newStake = tx.moveCall({
+        target: '0x3::iota_system::request_add_stake_non_entry',
+        arguments: [systemState, coin, tx.pure.address(newValidator)],
+    });
+
+    // Transfer the new StakedIota object to sender
+    tx.transferObjects([newStake], tx.pure.address(sender));
+
+    return tx;
+}

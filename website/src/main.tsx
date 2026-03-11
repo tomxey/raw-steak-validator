@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
 import '@iota/dapp-kit/dist/index.css';
 
 import { IotaClientProvider, WalletProvider } from '@iota/dapp-kit';
@@ -14,7 +15,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <QueryClientProvider client={queryClient}>
             <IotaClientProvider networks={networkConfig} defaultNetwork="mainnet">
                 <WalletProvider autoConnect>
-                    <App />
+                    <BrowserRouter>
+                        <App />
+                    </BrowserRouter>
                 </WalletProvider>
             </IotaClientProvider>
         </QueryClientProvider>

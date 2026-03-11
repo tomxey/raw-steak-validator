@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Routes, Route, NavLink } from 'react-router-dom';
 import {
     ConnectButton,
     useCurrentAccount,
@@ -9,50 +10,14 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
     VALIDATOR_ADDRESS,
-    IOTA_DECIMALS,
     MIN_STAKE_IOTA,
     GAS_BUDGET_NANOS,
     VALIDATOR_INNER_ID,
 } from './constants';
 import { createStakeTransaction, createUnstakeTransaction } from './lib/transactions';
+import { formatIota, waitAndCheckTx } from './lib/utils';
+import OptimizerPage from './OptimizerPage';
 import './App.css';
-
-async function waitAndCheckTx(
-    iotaClient: ReturnType<typeof useIotaClient>,
-    digest: string,
-): Promise<{ ok: boolean; error?: string }> {
-    try {
-        await iotaClient.waitForTransaction({ digest, timeout: 30_000 });
-    } catch {
-        // RPC may not have indexed it yet — still check status
-    }
-    try {
-        const result = await iotaClient.getTransactionBlock({
-            digest,
-            options: { showEffects: true },
-        });
-        const status = result.effects?.status;
-        if (status?.status === 'failure') {
-            return { ok: false, error: status.error ?? 'Transaction failed on-chain' };
-        }
-        return { ok: true };
-    } catch {
-        // Can't verify — assume success since the tx was submitted
-        return { ok: true };
-    }
-}
-
-function formatIota(nanos: string | bigint, decimals?: number): string {
-    const val = BigInt(nanos);
-    const whole = val / BigInt(10 ** IOTA_DECIMALS);
-    if (decimals === 0) return whole.toLocaleString();
-    const frac = val % BigInt(10 ** IOTA_DECIMALS);
-    const fracStr = frac.toString().padStart(IOTA_DECIMALS, '0').replace(/0+$/, '');
-    if (decimals !== undefined && fracStr) {
-        return `${whole.toLocaleString()}.${fracStr.slice(0, decimals)}`;
-    }
-    return fracStr ? `${whole.toLocaleString()}.${fracStr}` : whole.toLocaleString();
-}
 
 function App() {
     const account = useCurrentAccount();
@@ -60,26 +25,44 @@ function App() {
     return (
         <div className="app">
             <header className="header">
-                <div className="header-brand">
-                    <span className="logo">🥩</span>
-                    <h1>Raw Steak Validator</h1>
+                <div className="header-top">
+                    <div className="header-brand">
+                        <span className="logo">🥩</span>
+                        <h1>Raw Steak Validator</h1>
+                    </div>
+                    <ConnectButton />
                 </div>
-                <ConnectButton />
+                <nav className="header-nav">
+                    <NavLink to="/" end className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
+                        Stake
+                    </NavLink>
+                    <NavLink to="/optimize" className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
+                        Optimizer
+                    </NavLink>
+                </nav>
             </header>
 
-            <main className="main">
-                <ValidatorInfo />
-                {account ? (
-                    <>
-                        <StakeForm address={account.address} />
-                        <MyStakes address={account.address} />
-                    </>
-                ) : (
-                    <div className="card connect-prompt">
-                        <p>Connect your wallet to stake IOTA</p>
-                    </div>
-                )}
-            </main>
+            <Routes>
+                <Route
+                    path="/"
+                    element={
+                        <main className="main">
+                            <ValidatorInfo />
+                            {account ? (
+                                <>
+                                    <StakeForm address={account.address} />
+                                    <MyStakes address={account.address} />
+                                </>
+                            ) : (
+                                <div className="card connect-prompt">
+                                    <p>Connect your wallet to stake IOTA</p>
+                                </div>
+                            )}
+                        </main>
+                    }
+                />
+                <Route path="/optimize" element={<OptimizerPage />} />
+            </Routes>
 
             <footer className="footer">
                 <p>raw-steak.eu — IOTA Mainnet Validator</p>
@@ -234,7 +217,7 @@ function StakeForm({ address }: { address: string }) {
             return;
         }
 
-        const nanos = BigInt(Math.floor(amountNum * 10 ** IOTA_DECIMALS));
+        const nanos = BigInt(Math.floor(amountNum * 10 ** 9));
         if (nanos + GAS_BUDGET_NANOS > balanceNanos) {
             setStatus({ type: 'error', msg: `Insufficient balance (need ${formatIota((nanos + GAS_BUDGET_NANOS).toString())} IOTA including gas)` });
             return;
@@ -289,7 +272,7 @@ function StakeForm({ address }: { address: string }) {
                     onClick={() => {
                         const maxNanos = balanceNanos - GAS_BUDGET_NANOS;
                         if (maxNanos > 0) {
-                            setAmount((Number(maxNanos) / 10 ** IOTA_DECIMALS).toString());
+                            setAmount((Number(maxNanos) / 10 ** 9).toString());
                         }
                     }}
                     disabled={isSigning}
