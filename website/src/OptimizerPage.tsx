@@ -28,11 +28,12 @@ interface StakeSuggestion {
     estimatedReward: string | undefined;
     status: string;
     stakeActiveEpoch: string;
-    currentValidator: ValidatorApyInfo;
+    currentValidator: ValidatorApyInfo | null; // null for candidate/unknown validators
     bestValidator: ValidatorApyInfo;
     lostRewardIota: number;
     savingsPerEpoch: number;
     breakEvenEpochs: number;
+    validatorAddress: string; // always available from stake data
 }
 
 // ── Exchange rate APY fetching ───────────────────────────────────────
@@ -42,7 +43,8 @@ async function fetchExchangeRateApy(
     exchangeRatesId: string,
 ): Promise<{ perEpochYield: number; apy: number } | null> {
     try {
-        // Get the last page of dynamic fields (most recent epochs)
+        // getDynamicFields returns entries ordered by objectId hash, NOT epoch.
+        // We fetch a page and sort by epoch to find the two highest epochs.
         const fields = await client.getDynamicFields({
             parentId: exchangeRatesId,
             limit: 50,
@@ -50,7 +52,7 @@ async function fetchExchangeRateApy(
 
         if (fields.data.length < 2) return null;
 
-        // Sort by epoch (name value) descending and take the last 2
+        // Sort by epoch (name value) descending
         const sorted = [...fields.data].sort((a, b) => {
             const epochA = Number((a.name as { value: string }).value);
             const epochB = Number((b.name as { value: string }).value);
@@ -58,6 +60,11 @@ async function fetchExchangeRateApy(
         });
 
         const [latest, prev] = sorted;
+        const epochCurr = Number((latest.name as { value: string }).value);
+        const epochPrev = Number((prev.name as { value: string }).value);
+        const epochGap = epochCurr - epochPrev;
+
+        if (epochGap <= 0) return null;
 
         // Fetch both dynamic field objects
         const [latestObj, prevObj] = await Promise.all([
@@ -88,8 +95,10 @@ async function fetchExchangeRateApy(
 
         if (rateCurr === null || ratePrev === null || ratePrev === 0) return null;
 
-        const perEpochYield = (rateCurr - ratePrev) / ratePrev;
-        const apy = perEpochYield * 365 * 100; // as percentage
+        // Divide by epoch gap — the two entries may not be consecutive
+        const totalYield = (rateCurr - ratePrev) / ratePrev;
+        const perEpochYield = totalYield / epochGap;
+        const apy = perEpochYield * 365 * 100; // 1 epoch = 1 day
 
         return { perEpochYield, apy: Math.max(0, apy) };
     } catch {
@@ -257,17 +266,17 @@ export default function OptimizerPage() {
         const opt: StakeSuggestion[] = [];
 
         for (const group of stakes) {
-            const currentInfo = allApys.get(group.validatorAddress);
-            if (!currentInfo) continue;
+            const currentInfo = allApys.get(group.validatorAddress) ?? null;
 
             for (const stake of group.stakes) {
                 const principal = BigInt(stake.principal);
                 const principalIota = Number(principal) / 1e9;
                 const isPending = stake.status !== 'Active';
 
-                const lostRewardIota = principalIota * currentInfo.perEpochYield;
+                const currentYield = currentInfo?.perEpochYield ?? 0;
+                const lostRewardIota = principalIota * currentYield;
                 const savingsPerEpoch =
-                    principalIota * (bestValidator.perEpochYield - currentInfo.perEpochYield);
+                    principalIota * (bestValidator.perEpochYield - currentYield);
                 const breakEvenEpochs =
                     savingsPerEpoch > 0
                         ? Math.ceil(lostRewardIota / savingsPerEpoch)
@@ -284,14 +293,19 @@ export default function OptimizerPage() {
                     lostRewardIota,
                     savingsPerEpoch,
                     breakEvenEpochs,
+                    validatorAddress: group.validatorAddress,
                 };
 
-                // Suggest restake if different validator and APY improvement > 0.01%
-                if (
+                // Suggest restake if:
+                // - current validator has no APY data (candidate/unknown), or
+                // - different validator with APY improvement > 0.01%
+                const shouldSuggest =
                     !isPending &&
-                    currentInfo.address !== bestValidator.address &&
-                    bestValidator.apy - currentInfo.apy > 0.01
-                ) {
+                    (currentInfo === null ||
+                        (currentInfo.address !== bestValidator.address &&
+                            bestValidator.apy - currentInfo.apy > 0.01));
+
+                if (shouldSuggest) {
                     suggs.push(entry);
                 } else {
                     opt.push(entry);
@@ -452,7 +466,9 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
                 <div className="stake-detail">
                     <span className="label">Current</span>
                     <span className="value">
-                        {s.currentValidator.name} — {s.currentValidator.apy.toFixed(2)}% APY
+                        {s.currentValidator
+                            ? `${s.currentValidator.name} — ${s.currentValidator.apy.toFixed(2)}% APY`
+                            : `${s.validatorAddress.slice(0, 10)}... (candidate — no APY)`}
                     </span>
                 </div>
                 <div className="stake-detail">
@@ -461,14 +477,16 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
                         {s.bestValidator.name} — {s.bestValidator.apy.toFixed(2)}% APY
                     </span>
                 </div>
-                <div className="stake-detail">
-                    <span className="label">Break-even</span>
-                    <span className="value">
-                        {s.breakEvenEpochs === Infinity
-                            ? 'Never (no improvement)'
-                            : `~${s.breakEvenEpochs} epochs`}
-                    </span>
-                </div>
+                {s.currentValidator && (
+                    <div className="stake-detail">
+                        <span className="label">Break-even</span>
+                        <span className="value">
+                            {s.breakEvenEpochs === Infinity
+                                ? 'Never (no improvement)'
+                                : `~${s.breakEvenEpochs} epochs`}
+                        </span>
+                    </div>
+                )}
             </div>
             <div className="optimizer-actions">
                 <button
@@ -505,7 +523,9 @@ function OptimalItem({ item: s }: { item: StakeSuggestion }) {
                 <div className="stake-detail">
                     <span className="label">Validator</span>
                     <span className="value">
-                        {s.currentValidator.name} — {s.currentValidator.apy.toFixed(2)}% APY
+                        {s.currentValidator
+                            ? `${s.currentValidator.name} — ${s.currentValidator.apy.toFixed(2)}% APY`
+                            : `${s.validatorAddress.slice(0, 10)}... (candidate)`}
                     </span>
                 </div>
                 <div className="stake-detail">
