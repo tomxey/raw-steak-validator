@@ -1,0 +1,38 @@
+import { Transaction } from '@iota/iota-sdk/transactions';
+import { IOTA_SYSTEM_STATE_OBJECT_ID } from '@iota/iota-sdk/utils';
+
+export function createStakeTransaction(amount: bigint, validator: string) {
+    const tx = new Transaction();
+    tx.setGasBudget(50_000_000);
+    const stakeCoin = tx.splitCoins(tx.gas, [amount]);
+    tx.moveCall({
+        target: '0x3::iota_system::request_add_stake',
+        arguments: [
+            tx.sharedObjectRef({
+                objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                initialSharedVersion: 1,
+                mutable: true,
+            }),
+            stakeCoin,
+            tx.pure.address(validator),
+        ],
+    });
+    return tx;
+}
+
+export function createUnstakeTransaction(stakedIotaId: string) {
+    const tx = new Transaction();
+    tx.setGasBudget(50_000_000);
+    tx.moveCall({
+        target: '0x3::iota_system::request_withdraw_stake',
+        arguments: [
+            tx.sharedObjectRef({
+                objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                initialSharedVersion: 1,
+                mutable: true,
+            }),
+            tx.object(stakedIotaId),
+        ],
+    });
+    return tx;
+}
