@@ -83,6 +83,7 @@ function App() {
 
             <footer className="footer">
                 <p>raw-steak.eu — IOTA Mainnet Validator</p>
+                <a href="https://github.com/tomxey/raw-steak-validator" target="_blank" rel="noopener noreferrer">GitHub</a>
             </footer>
         </div>
     );
