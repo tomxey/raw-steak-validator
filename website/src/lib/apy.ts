@@ -10,9 +10,8 @@ export interface EpochRateEntry {
 
 /** Per-epoch yield computed between two consecutive rate entries */
 export interface EpochYieldEntry {
-    epoch: number; // the "newer" epoch
-    epochGap: number; // gap to previous entry (usually 1)
-    perEpochYield: number; // fractional yield normalized to 1 epoch
+    epoch: number; // the epoch this yield applies to
+    perEpochYield: number; // fractional yield for this single epoch
     annualizedApy: number; // perEpochYield * 365 * 100
 }
 
@@ -20,8 +19,8 @@ export interface EpochYieldEntry {
 export interface ValidatorApyHistory {
     epochYields: EpochYieldEntry[];
     latestApy: number; // single most recent epoch, annualized
-    avg7Apy: number; // 7-epoch weighted average, annualized
-    avg30Apy: number; // 30-epoch weighted average, annualized
+    avg7Apy: number; // simple average of last 7 epochs, annualized
+    avg30Apy: number; // simple average of last 30 epochs, annualized
     perEpochYield: number; // avg7 per-epoch yield (for break-even)
     isAnomalous: boolean; // latest deviates significantly from avg30
     anomalyFactor: number; // latestApy / avg30Apy (e.g. 3.0 = 3x)
@@ -39,9 +38,10 @@ export interface ValidatorStakeInfo {
 // ── Epoch yield computation ─────────────────────────────────────────
 
 /**
- * Compute per-epoch yields from a list of exchange rate entries.
- * Entries MUST be sorted ascending by epoch.
- * Each yield is normalized by the epoch gap between consecutive entries.
+ * Compute per-epoch yields from exchange rate entries sorted ascending by epoch.
+ * Exchange rates are recorded every epoch on-chain, so consecutive entries
+ * should have epochGap=1. If there's a gap (shouldn't happen with full data),
+ * we skip that pair rather than averaging across it.
  */
 export function computeEpochYields(entries: EpochRateEntry[]): EpochYieldEntry[] {
     if (entries.length < 2) return [];
@@ -52,14 +52,12 @@ export function computeEpochYields(entries: EpochRateEntry[]): EpochYieldEntry[]
         const curr = entries[i];
         const epochGap = curr.epoch - prev.epoch;
 
-        if (epochGap <= 0 || prev.rate <= 0) continue;
+        if (epochGap !== 1 || prev.rate <= 0) continue;
 
-        const totalYield = (curr.rate - prev.rate) / prev.rate;
-        const perEpochYield = totalYield / epochGap;
+        const perEpochYield = (curr.rate - prev.rate) / prev.rate;
 
         yields.push({
             epoch: curr.epoch,
-            epochGap,
             perEpochYield,
             annualizedApy: perEpochYield * 365 * 100,
         });
@@ -70,33 +68,21 @@ export function computeEpochYields(entries: EpochRateEntry[]): EpochYieldEntry[]
 // ── Average APY ─────────────────────────────────────────────────────
 
 /**
- * Compute weighted average annualized APY over the most recent `windowEpochs`
- * epochs. Weighting accounts for non-uniform epoch gaps: each yield entry
- * covers `epochGap` epochs of time.
- *
+ * Simple arithmetic average of the most recent `count` epoch yields, annualized.
  * Returns 0 if no yields are available.
  */
 export function computeAverageApy(
     yields: EpochYieldEntry[],
-    windowEpochs: number,
+    count: number,
 ): number {
-    if (yields.length === 0 || windowEpochs <= 0) return 0;
+    if (yields.length === 0 || count <= 0) return 0;
 
-    // Walk backwards from the most recent yield, accumulating epoch-weighted yield
-    let totalWeightedYield = 0;
-    let totalEpochs = 0;
-
-    for (let i = yields.length - 1; i >= 0 && totalEpochs < windowEpochs; i--) {
-        const y = yields[i];
-        // Clamp this entry's contribution so we don't exceed the window
-        const epochsToUse = Math.min(y.epochGap, windowEpochs - totalEpochs);
-        totalWeightedYield += y.perEpochYield * epochsToUse;
-        totalEpochs += epochsToUse;
+    const n = Math.min(count, yields.length);
+    let sum = 0;
+    for (let i = yields.length - n; i < yields.length; i++) {
+        sum += yields[i].perEpochYield;
     }
-
-    if (totalEpochs === 0) return 0;
-    const avgPerEpochYield = totalWeightedYield / totalEpochs;
-    return avgPerEpochYield * 365 * 100;
+    return (sum / n) * 365 * 100;
 }
 
 // ── Anomaly detection ───────────────────────────────────────────────
@@ -111,7 +97,6 @@ export function detectAnomaly(
     avgApy: number,
 ): { isAnomalous: boolean; factor: number } {
     if (avgApy <= 0) {
-        // If average is zero/negative but latest is positive, that's anomalous
         return {
             isAnomalous: latestApy > 0,
             factor: latestApy > 0 ? Infinity : 1,
@@ -149,7 +134,6 @@ export function computeValidatorApyHistory(
     const avg30Apy = computeAverageApy(epochYields, 30);
     const { isAnomalous, factor: anomalyFactor } = detectAnomaly(latestApy, avg30Apy);
 
-    // avg7 per-epoch yield for break-even calculations
     const perEpochYield = avg7Apy / (365 * 100);
 
     return {
@@ -163,18 +147,7 @@ export function computeValidatorApyHistory(
     };
 }
 
-// ── Restake yield estimation (moved from OptimizerPage) ─────────────
-//
-// Rewards ∝ voting_power ∝ stake. Per-staker yield for a validator is:
-//   yield_per_staker = (total_reward_to_pool) / pool_stake
-//                    = (pool_stake / total_network_stake) * total_network_reward * (1 - commission) / pool_stake
-//                    = (1 - commission) * total_network_reward / total_network_stake
-//
-// In the simple model (no voting power cap), per-staker yield is independent
-// of which validator you pick — it only depends on commission. But IIP-8
-// sets effective_commission = max(commission_rate, voting_power%), so large
-// validators pay higher effective commission, and the relationship becomes
-// stake-dependent.
+// ── Restake yield estimation ─────────────────────────────────────────
 
 /** Next-epoch effective stake: current pool + pending incoming - pending withdrawals */
 export function nextEpochStake(v: ValidatorStakeInfo): number {
@@ -195,12 +168,9 @@ export function estimatePostRestakeYield(
         };
     }
 
-    // Effective commission = max(commission%, votingPower%)
-    // Voting power ≈ stake / totalNetworkStake * 100 (as percentage, capped at 10%)
     const effectiveComm = (stake: number, commPct: number) =>
         Math.max(commPct, Math.min((stake / totalNetworkStake) * 100, 10));
 
-    // Use next-epoch stakes as baseline (accounts for all pending operations)
     const srcStake = source ? nextEpochStake(source) : 0;
     const srcComm = source?.commission ?? 0;
     const tgtStake = nextEpochStake(target);
@@ -209,11 +179,9 @@ export function estimatePostRestakeYield(
     const srcEffCommBefore = effectiveComm(srcStake, srcComm);
     const tgtEffCommBefore = effectiveComm(tgtStake, tgtComm);
 
-    // After this user's restake on top of already-pending operations
     const srcEffCommAfter = effectiveComm(Math.max(0, srcStake - moveAmount), srcComm);
     const tgtEffCommAfter = effectiveComm(tgtStake + moveAmount, tgtComm);
 
-    // Scale yields by (1 - newEffComm) / (1 - oldEffComm)
     const scaleYield = (yield_: number, effBefore: number, effAfter: number) => {
         const factor = (1 - effBefore / 100);
         if (factor <= 0) return 0;
