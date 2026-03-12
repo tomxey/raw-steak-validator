@@ -13,12 +13,14 @@ IOTA Mainnet validator staking dApp for "Raw Steak" validator (raw-steak.eu). A 
 cd website && npm install
 cd website && npm run dev          # Vite dev server
 cd website && npm run build        # TypeScript check + Vite production build
+cd website && npm test             # Run unit tests (vitest)
+cd website && npm run test:watch   # Watch mode
 
 # Deploy (from repo root, requires Docker on the server)
 bash scripts/deploy.sh
 ```
 
-No test runner or linter is configured.
+Tests use Vitest. No linter is configured.
 
 ## Architecture
 

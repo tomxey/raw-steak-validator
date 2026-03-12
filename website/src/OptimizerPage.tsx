@@ -10,6 +10,14 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { IotaClient, IotaValidatorSummary } from '@iota/iota-sdk/client';
 import { formatIota, waitAndCheckTx } from './lib/utils';
 import { createRestakeTransaction } from './lib/transactions';
+import {
+    computeValidatorApyHistory,
+    estimatePostRestakeYield,
+    computeBreakEven,
+    type EpochRateEntry,
+    type EpochYieldEntry,
+} from './lib/apy';
+import ValidatorDetail from './components/ValidatorDetail';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -17,8 +25,14 @@ interface ValidatorApyInfo {
     address: string;
     name: string;
     commission: number; // percentage, e.g. 5 means 5%
-    perEpochYield: number; // fractional, e.g. 0.0001
-    apy: number; // annualized, e.g. 3.65 means 3.65%
+    perEpochYield: number; // avg7 per-epoch yield (for break-even)
+    apy: number; // avg7 APY (primary ranking metric)
+    latestApy: number; // single most recent epoch
+    avg7Apy: number;
+    avg30Apy: number;
+    isAnomalous: boolean;
+    anomalyFactor: number;
+    epochYields: EpochYieldEntry[];
     poolStake: number; // total IOTA in the staking pool (in IOTA, not nanos)
     pendingStake: number; // pending incoming stake (IOTA)
     pendingWithdraw: number; // pending withdrawals (IOTA)
@@ -32,79 +46,69 @@ interface StakeEntry {
     stakeActiveEpoch: string;
     currentValidator: ValidatorApyInfo | null;
     validatorAddress: string;
+    validatorName: string | null;
 }
 
-// ── Exchange rate APY fetching ───────────────────────────────────────
+// ── Exchange rate history fetching ──────────────────────────────────
 
-async function fetchExchangeRateApy(
+async function fetchExchangeRateHistory(
     client: IotaClient,
     exchangeRatesId: string,
-): Promise<{ perEpochYield: number; apy: number } | null> {
+): Promise<EpochRateEntry[]> {
     try {
-        // getDynamicFields returns entries ordered by objectId hash, NOT epoch.
-        // We fetch a page and sort by epoch to find the two highest epochs.
         const fields = await client.getDynamicFields({
             parentId: exchangeRatesId,
             limit: 50,
         });
 
-        if (fields.data.length < 2) return null;
+        if (fields.data.length < 2) return [];
 
-        // Sort by epoch (name value) descending
+        // Sort by epoch ascending
         const sorted = [...fields.data].sort((a, b) => {
             const epochA = Number((a.name as { value: string }).value);
             const epochB = Number((b.name as { value: string }).value);
-            return epochB - epochA;
+            return epochA - epochB;
         });
 
-        const [latest, prev] = sorted;
-        const epochCurr = Number((latest.name as { value: string }).value);
-        const epochPrev = Number((prev.name as { value: string }).value);
-        const epochGap = epochCurr - epochPrev;
-
-        if (epochGap <= 0) return null;
-
-        // Fetch both dynamic field objects
-        const [latestObj, prevObj] = await Promise.all([
-            client.getDynamicFieldObject({
-                parentObjectId: exchangeRatesId,
-                name: latest.name,
-                options: { showContent: true },
-            }),
-            client.getDynamicFieldObject({
-                parentObjectId: exchangeRatesId,
-                name: prev.name,
-                options: { showContent: true },
-            }),
-        ]);
+        // Fetch all dynamic field objects
+        const objects = await Promise.all(
+            sorted.map((entry) =>
+                client.getDynamicFieldObject({
+                    parentObjectId: exchangeRatesId,
+                    name: entry.name,
+                    options: { showContent: true },
+                }),
+            ),
+        );
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const extractRate = (obj: any): number | null => {
-            const fields = obj?.data?.content?.fields?.value?.fields;
-            if (!fields) return null;
-            const iotaAmount = Number(fields.iota_amount);
-            const poolTokenAmount = Number(fields.pool_token_amount);
-            if (poolTokenAmount === 0) return null;
-            return iotaAmount / poolTokenAmount;
-        };
+        const entries: EpochRateEntry[] = [];
+        for (let i = 0; i < sorted.length; i++) {
+            const epoch = Number((sorted[i].name as { value: string }).value);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const obj = objects[i]?.data?.content as any;
+            const rateFields = obj?.fields?.value?.fields;
+            if (!rateFields) continue;
 
-        const rateCurr = extractRate(latestObj);
-        const ratePrev = extractRate(prevObj);
+            const iotaAmount = Number(rateFields.iota_amount);
+            const poolTokenAmount = Number(rateFields.pool_token_amount);
+            if (poolTokenAmount === 0) continue;
 
-        if (rateCurr === null || ratePrev === null || ratePrev === 0) return null;
+            entries.push({
+                epoch,
+                iotaAmount,
+                poolTokenAmount,
+                rate: iotaAmount / poolTokenAmount,
+            });
+        }
 
-        // Divide by epoch gap — the two entries may not be consecutive
-        const totalYield = (rateCurr - ratePrev) / ratePrev;
-        const perEpochYield = totalYield / epochGap;
-        const apy = perEpochYield * 365 * 100; // 1 epoch = 1 day
-
-        return { perEpochYield, apy: Math.max(0, apy) };
+        return entries;
     } catch {
-        return null;
+        return [];
     }
 }
 
-// ── Hook: fetch APY for ALL active validators ────────────────────────
+// ── Hook: fetch APY history for ALL active validators ───────────────
 
 function useAllValidatorApys(validators: IotaValidatorSummary[]) {
     const client = useIotaClient();
@@ -121,16 +125,24 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
 
             await Promise.all(
                 validators.map(async (v) => {
-                    const apyData = await fetchExchangeRateApy(
+                    const entries = await fetchExchangeRateHistory(
                         client,
                         v.exchangeRatesId,
                     );
+                    const history = computeValidatorApyHistory(entries);
+
                     results.set(v.iotaAddress, {
                         address: v.iotaAddress,
                         name: v.name,
                         commission: Number(v.commissionRate) / 100,
-                        perEpochYield: apyData?.perEpochYield ?? 0,
-                        apy: apyData?.apy ?? 0,
+                        perEpochYield: history.perEpochYield,
+                        apy: history.avg7Apy,
+                        latestApy: history.latestApy,
+                        avg7Apy: history.avg7Apy,
+                        avg30Apy: history.avg30Apy,
+                        isAnomalous: history.isAnomalous,
+                        anomalyFactor: history.anomalyFactor,
+                        epochYields: history.epochYields,
                         poolStake: Number(v.stakingPoolIotaBalance) / 1e9,
                         pendingStake: Number(v.pendingStake) / 1e9,
                         pendingWithdraw: Number(v.pendingTotalIotaWithdraw) / 1e9,
@@ -145,89 +157,56 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
     });
 }
 
-// ── APY estimation after restake ─────────────────────────────────────
-//
-// Rewards ∝ voting_power ∝ stake. Per-staker yield for a validator is:
-//   yield_per_staker = (total_reward_to_pool) / pool_stake
-//                    = (pool_stake / total_network_stake) * total_network_reward * (1 - commission) / pool_stake
-//                    = (1 - commission) * total_network_reward / total_network_stake
-//
-// In the simple model (no voting power cap), per-staker yield is independent
-// of which validator you pick — it only depends on commission. But IIP-8
-// sets effective_commission = max(commission_rate, voting_power%), so large
-// validators pay higher effective commission, and the relationship becomes
-// stake-dependent.
-//
-// We estimate post-restake per-epoch yield by scaling the observed yield
-// using the change in effective commission from the stake shift.
+// ── Hook: resolve names for candidate validators not in active set ───
 
-// Next-epoch effective stake: current pool + pending incoming - pending withdrawals
-function nextEpochStake(v: ValidatorApyInfo): number {
-    return v.poolStake + v.pendingStake - v.pendingWithdraw;
-}
-
-function estimatePostRestakeYield(
-    source: ValidatorApyInfo | null,
-    target: ValidatorApyInfo,
-    moveAmount: number,
-    totalNetworkStake: number,
-): { estSourceYield: number; estTargetYield: number; estTargetApy: number } {
-    if (totalNetworkStake <= 0) {
-        return {
-            estSourceYield: source?.perEpochYield ?? 0,
-            estTargetYield: target.perEpochYield,
-            estTargetApy: target.apy,
-        };
-    }
-
-    // Effective commission = max(commission%, votingPower%)
-    // Voting power ≈ stake / totalNetworkStake * 100 (as percentage, capped at 10%)
-    const effectiveComm = (stake: number, commPct: number) =>
-        Math.max(commPct, Math.min((stake / totalNetworkStake) * 100, 10));
-
-    // Use next-epoch stakes as baseline (accounts for all pending operations)
-    const srcStake = source ? nextEpochStake(source) : 0;
-    const srcComm = source?.commission ?? 0;
-    const tgtStake = nextEpochStake(target);
-    const tgtComm = target.commission;
-
-    const srcEffCommBefore = effectiveComm(srcStake, srcComm);
-    const tgtEffCommBefore = effectiveComm(tgtStake, tgtComm);
-
-    // After this user's restake on top of already-pending operations
-    const srcEffCommAfter = effectiveComm(Math.max(0, srcStake - moveAmount), srcComm);
-    const tgtEffCommAfter = effectiveComm(tgtStake + moveAmount, tgtComm);
-
-    // Scale yields by (1 - newEffComm) / (1 - oldEffComm)
-    const scaleYield = (yield_: number, effBefore: number, effAfter: number) => {
-        const factor = (1 - effBefore / 100);
-        if (factor <= 0) return 0;
-        return yield_ * (1 - effAfter / 100) / factor;
-    };
-
-    const estTargetYield = scaleYield(target.perEpochYield, tgtEffCommBefore, tgtEffCommAfter);
-
-    return {
-        estSourceYield: source
-            ? scaleYield(source.perEpochYield, srcEffCommBefore, srcEffCommAfter)
-            : 0,
-        estTargetYield,
-        estTargetApy: Math.max(0, estTargetYield * 365 * 100),
-    };
-}
-
-// ── Break-even calculation helper ────────────────────────────────────
-
-function computeBreakEven(
-    principalIota: number,
-    currentYield: number,
-    targetYield: number,
+function useCandidateValidatorNames(
+    stakes: ReturnType<typeof useIotaClientQuery<'getStakes'>>['data'],
+    activeValidators: IotaValidatorSummary[],
+    candidatesTableId: string | undefined,
 ) {
-    const lostReward = principalIota * currentYield;
-    const savingsPerEpoch = principalIota * (targetYield - currentYield);
-    const breakEvenEpochs =
-        savingsPerEpoch > 0 ? Math.ceil(lostReward / savingsPerEpoch) : Infinity;
-    return { lostReward, savingsPerEpoch, breakEvenEpochs };
+    const client = useIotaClient();
+
+    const unknownAddresses = useMemo(() => {
+        if (!stakes) return [];
+        const activeSet = new Set(activeValidators.map((v) => v.iotaAddress));
+        const unknown = new Set<string>();
+        for (const group of stakes) {
+            if (!activeSet.has(group.validatorAddress)) {
+                unknown.add(group.validatorAddress);
+            }
+        }
+        return [...unknown];
+    }, [stakes, activeValidators]);
+
+    return useQuery({
+        queryKey: ['candidate-validator-names', candidatesTableId, unknownAddresses.join(',')],
+        queryFn: async () => {
+            const names = new Map<string, string>();
+            if (!candidatesTableId) return names;
+
+            await Promise.all(
+                unknownAddresses.map(async (addr) => {
+                    try {
+                        const res = await client.getDynamicFieldObject({
+                            parentObjectId: candidatesTableId,
+                            name: { type: 'address', value: addr },
+                            options: { showContent: true },
+                        });
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        const content = res?.data?.content as any;
+                        const name = content?.fields?.value?.fields?.metadata?.fields?.name as string | undefined;
+                        if (name) names.set(addr, name);
+                    } catch {
+                        // Validator not found in candidates table
+                    }
+                }),
+            );
+
+            return names;
+        },
+        enabled: unknownAddresses.length > 0 && !!candidatesTableId,
+        staleTime: 60_000,
+    });
 }
 
 // ── Main component ───────────────────────────────────────────────────
@@ -245,11 +224,19 @@ export default function OptimizerPage() {
         { enabled: !!account },
     );
 
-    // Fetch APYs for ALL active validators
+    // Fetch APY history for ALL active validators
     const { data: allApys, isPending: apysPending } =
         useAllValidatorApys(activeValidators);
 
-    // Sorted validators list (by APY descending)
+    // Resolve names for candidate validators not in the active set
+    const { data: candidateNames } = useCandidateValidatorNames(
+        stakes, activeValidators, systemState?.validatorCandidatesId,
+    );
+
+    // Validator detail modal state
+    const [selectedValidator, setSelectedValidator] = useState<ValidatorApyInfo | null>(null);
+
+    // Sorted validators list (by avg7 APY descending)
     const rankedValidators = useMemo(() => {
         if (!allApys) return [];
         return [...allApys.values()].sort((a, b) => b.apy - a.apy);
@@ -269,6 +256,9 @@ export default function OptimizerPage() {
 
         for (const group of stakes) {
             const currentInfo = allApys.get(group.validatorAddress) ?? null;
+            const validatorName = currentInfo?.name
+                ?? candidateNames?.get(group.validatorAddress)
+                ?? null;
 
             for (const stake of group.stakes) {
                 const isPending = stake.status !== 'Active';
@@ -281,6 +271,7 @@ export default function OptimizerPage() {
                     stakeActiveEpoch: stake.stakeActiveEpoch,
                     currentValidator: currentInfo,
                     validatorAddress: group.validatorAddress,
+                    validatorName,
                 };
 
                 const shouldSuggest =
@@ -298,7 +289,7 @@ export default function OptimizerPage() {
         }
 
         return { suggestions: suggs, optimal: opt };
-    }, [stakes, bestValidator, allApys]);
+    }, [stakes, bestValidator, allApys, candidateNames]);
 
     const isLoading = systemPending || (account && stakesPending) || apysPending;
 
@@ -308,14 +299,19 @@ export default function OptimizerPage() {
                 <h2>Stake Optimizer</h2>
                 <p className="hint" style={{ marginTop: 0, marginBottom: 16 }}>
                     Compares validators by <strong>actual APY</strong> computed from on-chain
-                    exchange rates, not just commission.
+                    exchange rates (7-day average), not just commission.
                 </p>
 
                 {bestValidator && (
                     <div className="optimizer-best">
-                        <span className="label">Best available APY</span>
+                        <span className="label">Best available APY (7d avg)</span>
                         <span className="value status-active">
                             {bestValidator.apy.toFixed(2)}% — {bestValidator.name}
+                            {bestValidator.isAnomalous && (
+                                <span className="anomaly-badge" title={`Latest epoch: ${bestValidator.latestApy.toFixed(2)}% (${bestValidator.anomalyFactor.toFixed(1)}x avg)`}>
+                                    spike
+                                </span>
+                            )}
                         </span>
                     </div>
                 )}
@@ -346,8 +342,7 @@ export default function OptimizerPage() {
                         Restaking moves your stake atomically, but the new stake is pending for ~1
                         epoch before it earns rewards. Rewards are credited at epoch boundaries
                         using the pre-epoch exchange rate, so you lose ~1 epoch of rewards during
-                        the transition. The break-even estimate below shows how many epochs the
-                        higher APY needs to make up for that lost reward.
+                        the transition. The break-even estimate below uses 7-day average APY.
                     </div>
                     <div className="stakes-list">
                         {suggestions.map((s) => (
@@ -377,23 +372,42 @@ export default function OptimizerPage() {
             {!apysPending && rankedValidators.length > 0 && (
                 <div className="card">
                     <h2>Validator Rankings</h2>
+                    <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
+                        Click a validator to see detailed yield history. Sorted by 7-day average APY.
+                    </p>
                     <div className="validator-rankings">
                         <div className="rank-header">
                             <span className="rank-col-rank">#</span>
                             <span className="rank-col-name">Validator</span>
                             <span className="rank-col-comm">Comm.</span>
-                            <span className="rank-col-apy">APY</span>
+                            <span className="rank-col-apy">7d APY</span>
+                            <span className="rank-col-apy">30d APY</span>
+                            <span className="rank-col-apy">Latest</span>
                         </div>
                         {rankedValidators.map((v, i) => (
                             <div
                                 key={v.address}
-                                className={`rank-row ${i === 0 ? 'rank-best' : ''}`}
+                                className={`rank-row rank-row-clickable ${i === 0 ? 'rank-best' : ''}`}
+                                onClick={() => setSelectedValidator(v)}
                             >
                                 <span className="rank-col-rank">{i + 1}</span>
-                                <span className="rank-col-name">{v.name}</span>
+                                <span className="rank-col-name">
+                                    {v.name}
+                                    {v.isAnomalous && (
+                                        <span className="anomaly-badge" title={`Latest epoch APY is ${v.anomalyFactor.toFixed(1)}x the 30-day average`}>
+                                            spike
+                                        </span>
+                                    )}
+                                </span>
                                 <span className="rank-col-comm">{v.commission}%</span>
                                 <span className="rank-col-apy">
-                                    {v.apy > 0 ? `${v.apy.toFixed(2)}%` : '—'}
+                                    {v.avg7Apy > 0 ? `${v.avg7Apy.toFixed(2)}%` : '—'}
+                                </span>
+                                <span className="rank-col-apy">
+                                    {v.avg30Apy > 0 ? `${v.avg30Apy.toFixed(2)}%` : '—'}
+                                </span>
+                                <span className={`rank-col-apy ${v.isAnomalous ? 'apy-anomalous' : ''}`}>
+                                    {v.latestApy > 0 ? `${v.latestApy.toFixed(2)}%` : '—'}
                                 </span>
                             </div>
                         ))}
@@ -403,6 +417,13 @@ export default function OptimizerPage() {
 
             {apysPending && (
                 <div className="card">Loading validator APYs...</div>
+            )}
+
+            {selectedValidator && (
+                <ValidatorDetail
+                    validator={selectedValidator}
+                    onClose={() => setSelectedValidator(null)}
+                />
             )}
         </main>
     );
@@ -499,8 +520,13 @@ function SuggestionItem({
                     <span className="label">Current validator</span>
                     <span className="value">
                         {s.currentValidator
-                            ? `${s.currentValidator.name} — ${s.currentValidator.apy.toFixed(2)}% APY`
-                            : `${s.validatorAddress.slice(0, 10)}... (candidate — no APY)`}
+                            ? <>
+                                {s.currentValidator.name} — {s.currentValidator.apy.toFixed(2)}% APY
+                                {s.currentValidator.isAnomalous && (
+                                    <span className="anomaly-badge">spike</span>
+                                )}
+                            </>
+                            : `${s.validatorName ?? `${s.validatorAddress.slice(0, 10)}...`} (candidate — no APY)`}
                     </span>
                 </div>
                 {s.currentValidator && (
@@ -520,7 +546,7 @@ function SuggestionItem({
                     >
                         {rankedValidators.map((v) => (
                             <option key={v.address} value={v.address}>
-                                {v.name} — {v.apy.toFixed(2)}% APY
+                                {v.name} — {v.apy.toFixed(2)}% APY (7d avg)
                             </option>
                         ))}
                     </select>
@@ -533,7 +559,7 @@ function SuggestionItem({
                             <span className={`value ${apyDiff > 0 ? 'status-active' : ''}`} style={apyDiff <= 0 ? { color: 'var(--error)' } : undefined}>
                                 {estTargetApy.toFixed(2)}%{' '}
                                 <span className="hint-inline">
-                                    ({apyDiff >= 0 ? '+' : ''}{apyDiff.toFixed(2)}% vs current, was {targetValidator.apy.toFixed(2)}% historical)
+                                    ({apyDiff >= 0 ? '+' : ''}{apyDiff.toFixed(2)}% vs current, was {targetValidator.apy.toFixed(2)}% 7d avg)
                                 </span>
                             </span>
                         </div>
@@ -604,7 +630,7 @@ function OptimalItem({ item: s }: { item: StakeEntry }) {
                     <span className="value">
                         {s.currentValidator
                             ? `${s.currentValidator.name} — ${s.currentValidator.apy.toFixed(2)}% APY`
-                            : `${s.validatorAddress.slice(0, 10)}... (candidate)`}
+                            : `${s.validatorName ?? `${s.validatorAddress.slice(0, 10)}...`} (candidate)`}
                     </span>
                 </div>
                 <div className="stake-detail">
