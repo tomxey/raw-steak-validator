@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
     useCurrentAccount,
@@ -17,6 +17,7 @@ import {
     type EpochRateEntry,
     type EpochYieldEntry,
 } from './lib/apy';
+import { isAdmin } from './lib/admin';
 import ValidatorDetail from './components/ValidatorDetail';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -222,10 +223,24 @@ function useCandidateValidatorNames(
     });
 }
 
+// ── Admin check hook ─────────────────────────────────────────────────
+
+function useIsAdmin() {
+    const account = useCurrentAccount();
+    const [admin, setAdmin] = useState(false);
+    useEffect(() => {
+        let cancelled = false;
+        isAdmin(account?.address).then((v) => { if (!cancelled) setAdmin(v); });
+        return () => { cancelled = true; };
+    }, [account?.address]);
+    return admin;
+}
+
 // ── Main component ───────────────────────────────────────────────────
 
 export default function OptimizerPage() {
     const account = useCurrentAccount();
+    const admin = useIsAdmin();
     const { data: systemState, isPending: systemPending } =
         useIotaClientQuery('getLatestIotaSystemState');
 
@@ -306,16 +321,42 @@ export default function OptimizerPage() {
 
     const isLoading = systemPending || (account && stakesPending) || apysPending;
 
+    // ── Public view (non-admin) ──────────────────────────────────────
+    const publicStakes = useMemo(() => {
+        if (!stakes || !allApys) return [];
+        const entries: StakeEntry[] = [];
+        for (const group of stakes) {
+            const currentInfo = allApys.get(group.validatorAddress) ?? null;
+            const validatorName = currentInfo?.name
+                ?? candidateNames?.get(group.validatorAddress)
+                ?? null;
+            for (const stake of group.stakes) {
+                entries.push({
+                    stakedIotaId: stake.stakedIotaId,
+                    principal: BigInt(stake.principal),
+                    estimatedReward: stake.status === 'Active' ? stake.estimatedReward : undefined,
+                    status: stake.status,
+                    stakeActiveEpoch: stake.stakeActiveEpoch,
+                    currentValidator: currentInfo,
+                    validatorAddress: group.validatorAddress,
+                    validatorName,
+                });
+            }
+        }
+        return entries;
+    }, [stakes, allApys, candidateNames]);
+
     return (
         <main className="main">
             <div className="card">
-                <h2>Stake Optimizer</h2>
+                <h2>{admin ? 'Stake Optimizer' : 'Validator Explorer'}</h2>
                 <p className="hint" style={{ marginTop: 0, marginBottom: 16 }}>
-                    Compares validators by <strong>actual APY</strong> computed from on-chain
-                    exchange rates (7-day average), not just commission.
+                    {admin
+                        ? <>Compares validators by <strong>actual APY</strong> computed from on-chain exchange rates (7-day average), not just commission.</>
+                        : <>Historical APY computed from on-chain exchange rates.</>}
                 </p>
 
-                {bestValidator && (
+                {admin && bestValidator && (
                     <div className="optimizer-best">
                         <span className="label">Best available APY (7d avg)</span>
                         <span className="value status-active">
@@ -330,7 +371,7 @@ export default function OptimizerPage() {
                 )}
             </div>
 
-            {!account && (
+            {admin && !account && (
                 <div className="card connect-prompt">
                     <p>Connect your wallet to see personalized restaking suggestions</p>
                 </div>
@@ -340,7 +381,7 @@ export default function OptimizerPage() {
                 <div className="card">Loading stake data...</div>
             )}
 
-            {account && !isLoading && stakes && stakes.length === 0 && (
+            {admin && account && !isLoading && stakes && stakes.length === 0 && (
                 <div className="card">
                     <p className="hint">
                         You have no stakes yet. <Link to="/">Stake IOTA</Link> to get started.
@@ -348,7 +389,7 @@ export default function OptimizerPage() {
                 </div>
             )}
 
-            {account && !isLoading && suggestions.length > 0 && (
+            {admin && account && !isLoading && suggestions.length > 0 && (
                 <div className="card">
                     <h2>Suggestions</h2>
                     <div className="optimizer-warning">
@@ -371,7 +412,7 @@ export default function OptimizerPage() {
                 </div>
             )}
 
-            {account && !isLoading && optimal.length > 0 && (
+            {admin && account && !isLoading && optimal.length > 0 && (
                 <div className="card">
                     <h2>{suggestions.length > 0 ? 'Already Optimal' : 'Your Stakes'}</h2>
                     <div className="stakes-list">
@@ -382,9 +423,49 @@ export default function OptimizerPage() {
                 </div>
             )}
 
+            {!admin && account && !isLoading && publicStakes.length > 0 && (
+                <div className="card">
+                    <h2>Your Stakes</h2>
+                    <div className="stakes-list">
+                        {publicStakes.map((s) => (
+                            <div key={s.stakedIotaId} className="stake-item optimizer-item">
+                                <div className="stake-info">
+                                    <div className="stake-detail">
+                                        <span className="label">Principal</span>
+                                        <span className="value">{formatIota(s.principal)} IOTA</span>
+                                    </div>
+                                    {s.estimatedReward && (
+                                        <div className="stake-detail">
+                                            <span className="label">Accumulated Reward</span>
+                                            <span className="value reward">+{formatIota(s.estimatedReward)} IOTA</span>
+                                        </div>
+                                    )}
+                                    <div className="stake-detail">
+                                        <span className="label">Validator</span>
+                                        <span className="value">
+                                            {s.currentValidator
+                                                ? s.currentValidator.name
+                                                : `${s.validatorName ?? `${s.validatorAddress.slice(0, 10)}...`} (candidate)`}
+                                        </span>
+                                    </div>
+                                    <div className="stake-detail">
+                                        <span className="label">Status</span>
+                                        <span className={`value ${s.status !== 'Active' ? 'status-pending' : 'status-active'}`}>
+                                            {s.status !== 'Active'
+                                                ? `Pending (epoch ${s.stakeActiveEpoch})`
+                                                : 'Active'}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {!apysPending && rankedValidators.length > 0 && (
                 <div className="card">
-                    <h2>Validator Rankings</h2>
+                    <h2>{admin ? 'Validator Rankings' : 'Validators'}</h2>
                     <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
                         Click a validator to see detailed yield history. Sorted by 7-day average APY.
                     </p>
@@ -400,7 +481,7 @@ export default function OptimizerPage() {
                         {rankedValidators.map((v, i) => (
                             <div
                                 key={v.address}
-                                className={`rank-row rank-row-clickable ${i === 0 ? 'rank-best' : ''}`}
+                                className={`rank-row rank-row-clickable ${admin && i === 0 ? 'rank-best' : ''}`}
                                 onClick={() => setSelectedValidator(v)}
                             >
                                 <span className="rank-col-rank">{i + 1}</span>
@@ -432,10 +513,18 @@ export default function OptimizerPage() {
                 <div className="card">Loading validator APYs...</div>
             )}
 
+            {!admin && (
+                <div className="disclaimer">
+                    This data is provided for informational purposes only and does not constitute
+                    financial advice. Past performance does not indicate future results.
+                </div>
+            )}
+
             {selectedValidator && (
                 <ValidatorDetail
                     validator={selectedValidator}
                     onClose={() => setSelectedValidator(null)}
+                    showAdvisory={admin}
                 />
             )}
         </main>

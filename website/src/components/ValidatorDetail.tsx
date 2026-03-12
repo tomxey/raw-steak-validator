@@ -22,9 +22,10 @@ interface ValidatorApyInfo {
 interface ValidatorDetailProps {
     validator: ValidatorApyInfo;
     onClose: () => void;
+    showAdvisory?: boolean;
 }
 
-export default function ValidatorDetail({ validator: v, onClose }: ValidatorDetailProps) {
+export default function ValidatorDetail({ validator: v, onClose, showAdvisory = false }: ValidatorDetailProps) {
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-content" onClick={(e) => e.stopPropagation()}>
@@ -73,7 +74,7 @@ export default function ValidatorDetail({ validator: v, onClose }: ValidatorDeta
                         </div>
                     </div>
 
-                    {v.isAnomalous && (
+                    {showAdvisory && v.isAnomalous && (
                         <div className="anomaly-notice">
                             The latest epoch APY is significantly higher than the 30-day average.
                             This may be caused by a large withdrawal from this validator, temporarily

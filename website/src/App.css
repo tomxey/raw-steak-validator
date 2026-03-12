@@ -786,6 +786,15 @@ body {
     line-height: 1.5;
 }
 
+/* Disclaimer */
+.disclaimer {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    padding: 16px 12px;
+    line-height: 1.5;
+}
+
 /* Responsive */
 @media (max-width: 480px) {
     .header-top {

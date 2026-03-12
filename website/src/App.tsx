@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import {
     ConnectButton,
@@ -8,6 +8,7 @@ import {
     useIotaClient,
 } from '@iota/dapp-kit';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { isAdmin } from './lib/admin';
 import {
     VALIDATOR_ADDRESS,
     MIN_STAKE_IOTA,
@@ -19,8 +20,20 @@ import { formatIota, waitAndCheckTx } from './lib/utils';
 import OptimizerPage from './OptimizerPage';
 import './App.css';
 
+function useIsAdmin() {
+    const account = useCurrentAccount();
+    const [admin, setAdmin] = useState(false);
+    useEffect(() => {
+        let cancelled = false;
+        isAdmin(account?.address).then((v) => { if (!cancelled) setAdmin(v); });
+        return () => { cancelled = true; };
+    }, [account?.address]);
+    return admin;
+}
+
 function App() {
     const account = useCurrentAccount();
+    const admin = useIsAdmin();
 
     return (
         <div className="app">
@@ -37,7 +50,7 @@ function App() {
                         Stake
                     </NavLink>
                     <NavLink to="/optimize" className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
-                        Optimizer
+                        {admin ? 'Optimizer' : 'Validators'}
                     </NavLink>
                 </nav>
             </header>
