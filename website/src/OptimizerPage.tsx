@@ -25,7 +25,8 @@ import ValidatorDetail from './components/ValidatorDetail';
 interface ValidatorApyInfo {
     address: string;
     name: string;
-    commission: number; // percentage, e.g. 5 means 5%
+    commission: number; // declared commission percentage, e.g. 5 means 5%
+    effectiveCommission: number; // IIP-8: max(commission, votingPower), percentage
     perEpochYield: number; // avg7 per-epoch yield (for break-even)
     apy: number; // avg7 APY (primary ranking metric)
     latestApy: number; // single most recent epoch
@@ -145,10 +146,13 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
                     );
                     const history = computeValidatorApyHistory(entries);
 
+                    const commPct = Number(v.commissionRate) / 100;
+                    const votingPowerPct = Number(v.votingPower) / 100;
                     results.set(v.iotaAddress, {
                         address: v.iotaAddress,
                         name: v.name,
-                        commission: Number(v.commissionRate) / 100,
+                        commission: commPct,
+                        effectiveCommission: Math.max(commPct, votingPowerPct),
                         perEpochYield: history.perEpochYield,
                         apy: history.avg7Apy,
                         latestApy: history.latestApy,
@@ -493,7 +497,11 @@ export default function OptimizerPage() {
                                         </span>
                                     )}
                                 </span>
-                                <span className="rank-col-comm">{v.commission}%</span>
+                                    <span className="rank-col-comm" title={v.effectiveCommission > v.commission ? `Declared: ${v.commission}%, effective: ${v.effectiveCommission.toFixed(2)}% (IIP-8)` : `${v.commission}%`}>
+                                    {v.effectiveCommission > v.commission
+                                        ? <>{v.effectiveCommission.toFixed(2)}%<span className="comm-effective"> eff.</span></>
+                                        : `${v.commission}%`}
+                                </span>
                                 <span className="rank-col-apy">
                                     {v.avg7Apy > 0 ? `${v.avg7Apy.toFixed(2)}%` : '—'}
                                 </span>

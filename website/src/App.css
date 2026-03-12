@@ -597,6 +597,13 @@ body {
     cursor: pointer;
 }
 
+/* Effective commission indicator */
+.comm-effective {
+    font-size: 0.6rem;
+    color: var(--text-muted);
+    margin-left: 2px;
+}
+
 /* Anomaly badge */
 .anomaly-badge {
     display: inline-block;

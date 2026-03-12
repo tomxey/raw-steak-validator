@@ -6,6 +6,7 @@ interface ValidatorApyInfo {
     address: string;
     name: string;
     commission: number;
+    effectiveCommission: number;
     perEpochYield: number;
     apy: number;
     latestApy: number;
@@ -43,8 +44,12 @@ export default function ValidatorDetail({ validator: v, onClose, showAdvisory = 
                             </span>
                         </div>
                         <div className="detail-item">
-                            <span className="label">Commission</span>
+                            <span className="label">Commission (declared)</span>
                             <span className="value">{v.commission}%</span>
+                        </div>
+                        <div className="detail-item">
+                            <span className="label">Effective Commission (IIP-8)</span>
+                            <span className="value">{v.effectiveCommission.toFixed(2)}%</span>
                         </div>
                     </div>
 
