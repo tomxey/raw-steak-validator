@@ -37,7 +37,7 @@ function App() {
                         Stake
                     </NavLink>
                     <NavLink to="/optimize" className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
-                        Optimizer
+                        Validators
                     </NavLink>
                 </nav>
             </header>

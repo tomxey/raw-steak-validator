@@ -73,15 +73,6 @@ export default function ValidatorDetail({ validator: v, onClose }: ValidatorDeta
                         </div>
                     </div>
 
-                    {v.isAnomalous && (
-                        <div className="anomaly-notice">
-                            The latest epoch APY is significantly higher than the 30-day average.
-                            This may be caused by a large withdrawal from this validator, temporarily
-                            increasing rewards for remaining stakers. Consider the averaged APY for
-                            long-term decisions.
-                        </div>
-                    )}
-
                     <h3>Reward per IOTA per Epoch</h3>
                     <EpochYieldChart
                         yields={v.epochYields}
