@@ -56,23 +56,36 @@ async function fetchExchangeRateHistory(
     exchangeRatesId: string,
 ): Promise<EpochRateEntry[]> {
     try {
-        const fields = await client.getDynamicFields({
-            parentId: exchangeRatesId,
-            limit: 50,
-        });
+        // Paginate to get ALL dynamic field entries (exchange rates are 1 per epoch)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const allFields: any[] = [];
+        let cursor: string | null | undefined = undefined;
+        let hasNext = true;
+        while (hasNext) {
+            const page = await client.getDynamicFields({
+                parentId: exchangeRatesId,
+                limit: 50,
+                ...(cursor ? { cursor } : {}),
+            });
+            allFields.push(...page.data);
+            hasNext = page.hasNextPage;
+            cursor = page.nextCursor;
+        }
 
-        if (fields.data.length < 2) return [];
+        if (allFields.length < 2) return [];
 
         // Sort by epoch ascending
-        const sorted = [...fields.data].sort((a, b) => {
+        const sorted = allFields.sort((a, b) => {
             const epochA = Number((a.name as { value: string }).value);
             const epochB = Number((b.name as { value: string }).value);
             return epochA - epochB;
         });
 
-        // Fetch all dynamic field objects
+        // Only fetch the most recent 51 entries (50 yields need 51 rate points)
+        const recent = sorted.length > 51 ? sorted.slice(-51) : sorted;
+
         const objects = await Promise.all(
-            sorted.map((entry) =>
+            recent.map((entry) =>
                 client.getDynamicFieldObject({
                     parentObjectId: exchangeRatesId,
                     name: entry.name,
@@ -83,8 +96,8 @@ async function fetchExchangeRateHistory(
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const entries: EpochRateEntry[] = [];
-        for (let i = 0; i < sorted.length; i++) {
-            const epoch = Number((sorted[i].name as { value: string }).value);
+        for (let i = 0; i < recent.length; i++) {
+            const epoch = Number((recent[i].name as { value: string }).value);
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const obj = objects[i]?.data?.content as any;
             const rateFields = obj?.fields?.value?.fields;

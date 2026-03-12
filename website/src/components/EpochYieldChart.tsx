@@ -202,14 +202,6 @@ export default function EpochYieldChart({
                     Reward/IOTA: {formatRewardLabel(rewardPerIota[hoveredIndex])}
                     <br />
                     APY: {yields[hoveredIndex].annualizedApy.toFixed(2)}%
-                    {yields[hoveredIndex].epochGap > 1 && (
-                        <>
-                            <br />
-                            <span className="chart-tooltip-note">
-                                (averaged over {yields[hoveredIndex].epochGap} epochs)
-                            </span>
-                        </>
-                    )}
                 </div>
             )}
         </div>
