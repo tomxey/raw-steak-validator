@@ -19,21 +19,16 @@ interface ValidatorApyInfo {
     commission: number; // percentage, e.g. 5 means 5%
     perEpochYield: number; // fractional, e.g. 0.0001
     apy: number; // annualized, e.g. 3.65 means 3.65%
-    exchangeRatesId: string;
 }
 
-interface StakeSuggestion {
+interface StakeEntry {
     stakedIotaId: string;
     principal: bigint;
     estimatedReward: string | undefined;
     status: string;
     stakeActiveEpoch: string;
-    currentValidator: ValidatorApyInfo | null; // null for candidate/unknown validators
-    bestValidator: ValidatorApyInfo;
-    lostRewardIota: number;
-    savingsPerEpoch: number;
-    breakEvenEpochs: number;
-    validatorAddress: string; // always available from stake data
+    currentValidator: ValidatorApyInfo | null;
+    validatorAddress: string;
 }
 
 // ── Exchange rate APY fetching ───────────────────────────────────────
@@ -106,33 +101,23 @@ async function fetchExchangeRateApy(
     }
 }
 
-// ── Hook: fetch APY for a set of validators ──────────────────────────
+// ── Hook: fetch APY for ALL active validators ────────────────────────
 
-function useValidatorApys(validators: IotaValidatorSummary[]) {
+function useAllValidatorApys(validators: IotaValidatorSummary[]) {
     const client = useIotaClient();
 
-    // Pick which validators to fetch APY for:
-    // - Top 10 lowest commission
-    // - Will be merged with user's staked validators later
-    const candidateAddresses = useMemo(() => {
-        const sorted = [...validators].sort(
-            (a, b) => Number(a.commissionRate) - Number(b.commissionRate),
-        );
-        return sorted.slice(0, 10).map((v) => v.iotaAddress);
-    }, [validators]);
+    const validatorIds = useMemo(
+        () => validators.map((v) => v.iotaAddress).sort().join(','),
+        [validators],
+    );
 
     return useQuery({
-        queryKey: ['validator-apys', candidateAddresses.join(',')],
+        queryKey: ['all-validator-apys', validatorIds],
         queryFn: async () => {
             const results = new Map<string, ValidatorApyInfo>();
 
-            // Build set of validators to query (candidates + dedup handled by caller)
-            const toFetch = validators.filter((v) =>
-                candidateAddresses.includes(v.iotaAddress),
-            );
-
             await Promise.all(
-                toFetch.map(async (v) => {
+                validators.map(async (v) => {
                     const apyData = await fetchExchangeRateApy(
                         client,
                         v.exchangeRatesId,
@@ -143,7 +128,6 @@ function useValidatorApys(validators: IotaValidatorSummary[]) {
                         commission: Number(v.commissionRate) / 100,
                         perEpochYield: apyData?.perEpochYield ?? 0,
                         apy: apyData?.apy ?? 0,
-                        exchangeRatesId: v.exchangeRatesId,
                     });
                 }),
             );
@@ -155,52 +139,18 @@ function useValidatorApys(validators: IotaValidatorSummary[]) {
     });
 }
 
-// ── Hook: fetch APY for extra validators (user's staked ones) ────────
+// ── Break-even calculation helper ────────────────────────────────────
 
-function useExtraValidatorApys(
-    validators: IotaValidatorSummary[],
-    addresses: string[],
-    existingApys: Map<string, ValidatorApyInfo> | undefined,
+function computeBreakEven(
+    principalIota: number,
+    currentYield: number,
+    targetYield: number,
 ) {
-    const client = useIotaClient();
-
-    // Only fetch for addresses not already in existingApys
-    const missingAddresses = useMemo(() => {
-        if (!existingApys) return addresses;
-        return addresses.filter((a) => !existingApys.has(a));
-    }, [addresses, existingApys]);
-
-    return useQuery({
-        queryKey: ['extra-validator-apys', missingAddresses.join(',')],
-        queryFn: async () => {
-            const results = new Map<string, ValidatorApyInfo>();
-
-            const toFetch = validators.filter((v) =>
-                missingAddresses.includes(v.iotaAddress),
-            );
-
-            await Promise.all(
-                toFetch.map(async (v) => {
-                    const apyData = await fetchExchangeRateApy(
-                        client,
-                        v.exchangeRatesId,
-                    );
-                    results.set(v.iotaAddress, {
-                        address: v.iotaAddress,
-                        name: v.name,
-                        commission: Number(v.commissionRate) / 100,
-                        perEpochYield: apyData?.perEpochYield ?? 0,
-                        apy: apyData?.apy ?? 0,
-                        exchangeRatesId: v.exchangeRatesId,
-                    });
-                }),
-            );
-
-            return results;
-        },
-        enabled: missingAddresses.length > 0 && validators.length > 0,
-        staleTime: 60_000,
-    });
+    const lostReward = principalIota * currentYield;
+    const savingsPerEpoch = principalIota * (targetYield - currentYield);
+    const breakEvenEpochs =
+        savingsPerEpoch > 0 ? Math.ceil(lostReward / savingsPerEpoch) : Infinity;
+    return { lostReward, savingsPerEpoch, breakEvenEpochs };
 }
 
 // ── Main component ───────────────────────────────────────────────────
@@ -218,87 +168,44 @@ export default function OptimizerPage() {
         { enabled: !!account },
     );
 
-    // Addresses of validators the user is staked with
-    const stakedValidatorAddresses = useMemo(() => {
-        if (!stakes) return [];
-        return [...new Set(stakes.map((s) => s.validatorAddress))];
-    }, [stakes]);
+    // Fetch APYs for ALL active validators
+    const { data: allApys, isPending: apysPending } =
+        useAllValidatorApys(activeValidators);
 
-    // Fetch APYs for top-10 candidates
-    const { data: candidateApys, isPending: apysPending } =
-        useValidatorApys(activeValidators);
-
-    // Fetch APYs for user's staked validators (if not already covered)
-    const { data: extraApys } = useExtraValidatorApys(
-        activeValidators,
-        stakedValidatorAddresses,
-        candidateApys,
-    );
-
-    // Merge all APYs
-    const allApys = useMemo(() => {
-        const merged = new Map<string, ValidatorApyInfo>();
-        if (candidateApys) {
-            for (const [k, v] of candidateApys) merged.set(k, v);
-        }
-        if (extraApys) {
-            for (const [k, v] of extraApys) merged.set(k, v);
-        }
-        return merged;
-    }, [candidateApys, extraApys]);
-
-    // Find the best APY validator
-    const bestValidator = useMemo(() => {
-        let best: ValidatorApyInfo | null = null;
-        for (const v of allApys.values()) {
-            if (!best || v.apy > best.apy) best = v;
-        }
-        return best;
+    // Sorted validators list (by APY descending)
+    const rankedValidators = useMemo(() => {
+        if (!allApys) return [];
+        return [...allApys.values()].sort((a, b) => b.apy - a.apy);
     }, [allApys]);
 
-    // Build suggestions
+    // Find the best APY validator
+    const bestValidator = rankedValidators.length > 0 ? rankedValidators[0] : null;
+
+    // Build stake entries
     const { suggestions, optimal } = useMemo(() => {
-        if (!stakes || !bestValidator || allApys.size === 0) {
+        if (!stakes || !bestValidator || !allApys || allApys.size === 0) {
             return { suggestions: [], optimal: [] };
         }
 
-        const suggs: StakeSuggestion[] = [];
-        const opt: StakeSuggestion[] = [];
+        const suggs: StakeEntry[] = [];
+        const opt: StakeEntry[] = [];
 
         for (const group of stakes) {
             const currentInfo = allApys.get(group.validatorAddress) ?? null;
 
             for (const stake of group.stakes) {
-                const principal = BigInt(stake.principal);
-                const principalIota = Number(principal) / 1e9;
                 const isPending = stake.status !== 'Active';
 
-                const currentYield = currentInfo?.perEpochYield ?? 0;
-                const lostRewardIota = principalIota * currentYield;
-                const savingsPerEpoch =
-                    principalIota * (bestValidator.perEpochYield - currentYield);
-                const breakEvenEpochs =
-                    savingsPerEpoch > 0
-                        ? Math.ceil(lostRewardIota / savingsPerEpoch)
-                        : Infinity;
-
-                const entry: StakeSuggestion = {
+                const entry: StakeEntry = {
                     stakedIotaId: stake.stakedIotaId,
-                    principal,
+                    principal: BigInt(stake.principal),
                     estimatedReward: stake.status === 'Active' ? stake.estimatedReward : undefined,
                     status: stake.status,
                     stakeActiveEpoch: stake.stakeActiveEpoch,
                     currentValidator: currentInfo,
-                    bestValidator,
-                    lostRewardIota,
-                    savingsPerEpoch,
-                    breakEvenEpochs,
                     validatorAddress: group.validatorAddress,
                 };
 
-                // Suggest restake if:
-                // - current validator has no APY data (candidate/unknown), or
-                // - different validator with APY improvement > 0.01%
                 const shouldSuggest =
                     !isPending &&
                     (currentInfo === null ||
@@ -313,52 +220,18 @@ export default function OptimizerPage() {
             }
         }
 
-        // Sort suggestions by savings (highest first)
-        suggs.sort((a, b) => b.savingsPerEpoch - a.savingsPerEpoch);
-
         return { suggestions: suggs, optimal: opt };
     }, [stakes, bestValidator, allApys]);
 
-    const isLoading = systemPending || stakesPending || apysPending;
-
-    if (!account) {
-        return (
-            <main className="main">
-                <div className="card connect-prompt">
-                    <p>Connect your wallet to optimize your stakes</p>
-                </div>
-            </main>
-        );
-    }
-
-    if (isLoading) {
-        return (
-            <main className="main">
-                <div className="card">Loading stake data and validator APYs...</div>
-            </main>
-        );
-    }
-
-    if (!stakes || stakes.length === 0) {
-        return (
-            <main className="main">
-                <div className="card">
-                    <h2>Stake Optimizer</h2>
-                    <p className="hint">
-                        You have no stakes yet. <Link to="/">Stake IOTA</Link> to get started.
-                    </p>
-                </div>
-            </main>
-        );
-    }
+    const isLoading = systemPending || (account && stakesPending) || apysPending;
 
     return (
         <main className="main">
             <div className="card">
                 <h2>Stake Optimizer</h2>
                 <p className="hint" style={{ marginTop: 0, marginBottom: 16 }}>
-                    Compares your stakes by <strong>actual APY</strong> (computed from on-chain
-                    exchange rates), not just commission. Shows break-even epochs for restaking.
+                    Compares validators by <strong>actual APY</strong> computed from on-chain
+                    exchange rates, not just commission.
                 </p>
 
                 {bestValidator && (
@@ -371,7 +244,25 @@ export default function OptimizerPage() {
                 )}
             </div>
 
-            {suggestions.length > 0 && (
+            {!account && (
+                <div className="card connect-prompt">
+                    <p>Connect your wallet to see personalized restaking suggestions</p>
+                </div>
+            )}
+
+            {account && isLoading && (
+                <div className="card">Loading stake data...</div>
+            )}
+
+            {account && !isLoading && stakes && stakes.length === 0 && (
+                <div className="card">
+                    <p className="hint">
+                        You have no stakes yet. <Link to="/">Stake IOTA</Link> to get started.
+                    </p>
+                </div>
+            )}
+
+            {account && !isLoading && suggestions.length > 0 && (
                 <div className="card">
                     <h2>Suggestions</h2>
                     <div className="optimizer-warning">
@@ -381,13 +272,18 @@ export default function OptimizerPage() {
                     </div>
                     <div className="stakes-list">
                         {suggestions.map((s) => (
-                            <SuggestionItem key={s.stakedIotaId} suggestion={s} />
+                            <SuggestionItem
+                                key={s.stakedIotaId}
+                                stake={s}
+                                rankedValidators={rankedValidators}
+                                bestValidator={bestValidator!}
+                            />
                         ))}
                     </div>
                 </div>
             )}
 
-            {optimal.length > 0 && (
+            {account && !isLoading && optimal.length > 0 && (
                 <div className="card">
                     <h2>{suggestions.length > 0 ? 'Already Optimal' : 'Your Stakes'}</h2>
                     <div className="stakes-list">
@@ -397,19 +293,65 @@ export default function OptimizerPage() {
                     </div>
                 </div>
             )}
+
+            {!apysPending && rankedValidators.length > 0 && (
+                <div className="card">
+                    <h2>Validator Rankings</h2>
+                    <div className="validator-rankings">
+                        <div className="rank-header">
+                            <span className="rank-col-rank">#</span>
+                            <span className="rank-col-name">Validator</span>
+                            <span className="rank-col-comm">Comm.</span>
+                            <span className="rank-col-apy">APY</span>
+                        </div>
+                        {rankedValidators.map((v, i) => (
+                            <div
+                                key={v.address}
+                                className={`rank-row ${i === 0 ? 'rank-best' : ''}`}
+                            >
+                                <span className="rank-col-rank">{i + 1}</span>
+                                <span className="rank-col-name">{v.name}</span>
+                                <span className="rank-col-comm">{v.commission}%</span>
+                                <span className="rank-col-apy">
+                                    {v.apy > 0 ? `${v.apy.toFixed(2)}%` : '—'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {apysPending && (
+                <div className="card">Loading validator APYs...</div>
+            )}
         </main>
     );
 }
 
-// ── Suggestion item with restake button ──────────────────────────────
+// ── Suggestion item with target selector + restake ───────────────────
 
-function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
+function SuggestionItem({
+    stake: s,
+    rankedValidators,
+    bestValidator,
+}: {
+    stake: StakeEntry;
+    rankedValidators: ValidatorApyInfo[];
+    bestValidator: ValidatorApyInfo;
+}) {
+    const [targetAddress, setTargetAddress] = useState(bestValidator.address);
     const account = useCurrentAccount();
     const iotaClient = useIotaClient();
     const queryClient = useQueryClient();
     const { mutate: signAndExecute } = useSignAndExecuteTransaction();
     const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
     const [isPending, setIsPending] = useState(false);
+
+    const targetValidator = rankedValidators.find((v) => v.address === targetAddress) ?? bestValidator;
+    const principalIota = Number(s.principal) / 1e9;
+    const currentYield = s.currentValidator?.perEpochYield ?? 0;
+    const { breakEvenEpochs } = computeBreakEven(principalIota, currentYield, targetValidator.perEpochYield);
+    const apyDiff = targetValidator.apy - (s.currentValidator?.apy ?? 0);
 
     async function handleRestake() {
         if (!account) return;
@@ -418,7 +360,7 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
 
         const tx = createRestakeTransaction(
             s.stakedIotaId,
-            s.bestValidator.address,
+            targetAddress,
             account.address,
         );
         tx.setSender(account.address);
@@ -471,19 +413,44 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
                             : `${s.validatorAddress.slice(0, 10)}... (candidate — no APY)`}
                     </span>
                 </div>
-                <div className="stake-detail">
-                    <span className="label">Best</span>
-                    <span className="value status-active">
-                        {s.bestValidator.name} — {s.bestValidator.apy.toFixed(2)}% APY
-                    </span>
+
+                <div className="stake-detail target-row">
+                    <span className="label">Restake to</span>
+                    <select
+                        className="target-select"
+                        value={targetAddress}
+                        onChange={(e) => setTargetAddress(e.target.value)}
+                        disabled={isPending}
+                    >
+                        {rankedValidators.map((v) => (
+                            <option key={v.address} value={v.address}>
+                                {v.name} — {v.apy.toFixed(2)}% APY
+                            </option>
+                        ))}
+                    </select>
                 </div>
-                {s.currentValidator && (
+
+                {apyDiff > 0 && s.currentValidator && (
                     <div className="stake-detail">
                         <span className="label">Break-even</span>
                         <span className="value">
-                            {s.breakEvenEpochs === Infinity
-                                ? 'Never (no improvement)'
-                                : `~${s.breakEvenEpochs} epochs`}
+                            {breakEvenEpochs === Infinity
+                                ? 'Never'
+                                : `~${breakEvenEpochs} epochs (~${breakEvenEpochs} days)`}
+                        </span>
+                    </div>
+                )}
+                {apyDiff > 0 && (
+                    <div className="stake-detail">
+                        <span className="label">APY improvement</span>
+                        <span className="value status-active">+{apyDiff.toFixed(2)}%</span>
+                    </div>
+                )}
+                {apyDiff <= 0 && targetAddress !== s.validatorAddress && (
+                    <div className="stake-detail">
+                        <span className="label">APY change</span>
+                        <span className="value" style={{ color: 'var(--error)' }}>
+                            {apyDiff.toFixed(2)}% (worse or equal)
                         </span>
                     </div>
                 )}
@@ -492,7 +459,7 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
                 <button
                     className="btn-restake"
                     onClick={handleRestake}
-                    disabled={isPending}
+                    disabled={isPending || targetAddress === s.validatorAddress}
                 >
                     {isPending ? 'Signing...' : 'Restake'}
                 </button>
@@ -504,7 +471,7 @@ function SuggestionItem({ suggestion: s }: { suggestion: StakeSuggestion }) {
 
 // ── Optimal item (no action needed) ──────────────────────────────────
 
-function OptimalItem({ item: s }: { item: StakeSuggestion }) {
+function OptimalItem({ item: s }: { item: StakeEntry }) {
     const isPending = s.status !== 'Active';
 
     return (

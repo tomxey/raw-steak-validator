@@ -476,6 +476,109 @@ body {
     cursor: not-allowed;
 }
 
+/* Target validator selector */
+.target-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+}
+
+.target-row .label {
+    align-self: flex-start;
+}
+
+.target-select {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 0.85rem;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23a08080' stroke-width='2' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+}
+
+.target-select:focus {
+    border-color: var(--accent-light);
+}
+
+.target-select option {
+    background: var(--bg-card);
+    color: var(--text);
+}
+
+/* Validator rankings */
+.validator-rankings {
+    display: flex;
+    flex-direction: column;
+    font-size: 0.85rem;
+}
+
+.rank-header {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.rank-row {
+    display: flex;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    transition: background 0.15s;
+}
+
+.rank-row:last-child {
+    border-bottom: none;
+}
+
+.rank-row:hover {
+    background: var(--bg-card-hover);
+}
+
+.rank-best {
+    color: var(--success);
+    font-weight: 600;
+}
+
+.rank-col-rank {
+    width: 32px;
+    flex-shrink: 0;
+    text-align: center;
+}
+
+.rank-col-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rank-col-comm {
+    width: 60px;
+    flex-shrink: 0;
+    text-align: right;
+}
+
+.rank-col-apy {
+    width: 70px;
+    flex-shrink: 0;
+    text-align: right;
+    font-weight: 500;
+}
+
 /* Responsive */
 @media (max-width: 480px) {
     .header-top {
