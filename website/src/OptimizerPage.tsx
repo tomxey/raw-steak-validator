@@ -19,6 +19,9 @@ interface ValidatorApyInfo {
     commission: number; // percentage, e.g. 5 means 5%
     perEpochYield: number; // fractional, e.g. 0.0001
     apy: number; // annualized, e.g. 3.65 means 3.65%
+    poolStake: number; // total IOTA in the staking pool (in IOTA, not nanos)
+    pendingStake: number; // pending incoming stake (IOTA)
+    pendingWithdraw: number; // pending withdrawals (IOTA)
 }
 
 interface StakeEntry {
@@ -128,6 +131,9 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
                         commission: Number(v.commissionRate) / 100,
                         perEpochYield: apyData?.perEpochYield ?? 0,
                         apy: apyData?.apy ?? 0,
+                        poolStake: Number(v.stakingPoolIotaBalance) / 1e9,
+                        pendingStake: Number(v.pendingStake) / 1e9,
+                        pendingWithdraw: Number(v.pendingTotalIotaWithdraw) / 1e9,
                     });
                 }),
             );
@@ -137,6 +143,77 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
         enabled: validators.length > 0,
         staleTime: 60_000,
     });
+}
+
+// ── APY estimation after restake ─────────────────────────────────────
+//
+// Rewards ∝ voting_power ∝ stake. Per-staker yield for a validator is:
+//   yield_per_staker = (total_reward_to_pool) / pool_stake
+//                    = (pool_stake / total_network_stake) * total_network_reward * (1 - commission) / pool_stake
+//                    = (1 - commission) * total_network_reward / total_network_stake
+//
+// In the simple model (no voting power cap), per-staker yield is independent
+// of which validator you pick — it only depends on commission. But IIP-8
+// sets effective_commission = max(commission_rate, voting_power%), so large
+// validators pay higher effective commission, and the relationship becomes
+// stake-dependent.
+//
+// We estimate post-restake per-epoch yield by scaling the observed yield
+// using the change in effective commission from the stake shift.
+
+// Next-epoch effective stake: current pool + pending incoming - pending withdrawals
+function nextEpochStake(v: ValidatorApyInfo): number {
+    return v.poolStake + v.pendingStake - v.pendingWithdraw;
+}
+
+function estimatePostRestakeYield(
+    source: ValidatorApyInfo | null,
+    target: ValidatorApyInfo,
+    moveAmount: number,
+    totalNetworkStake: number,
+): { estSourceYield: number; estTargetYield: number; estTargetApy: number } {
+    if (totalNetworkStake <= 0) {
+        return {
+            estSourceYield: source?.perEpochYield ?? 0,
+            estTargetYield: target.perEpochYield,
+            estTargetApy: target.apy,
+        };
+    }
+
+    // Effective commission = max(commission%, votingPower%)
+    // Voting power ≈ stake / totalNetworkStake * 100 (as percentage, capped at 10%)
+    const effectiveComm = (stake: number, commPct: number) =>
+        Math.max(commPct, Math.min((stake / totalNetworkStake) * 100, 10));
+
+    // Use next-epoch stakes as baseline (accounts for all pending operations)
+    const srcStake = source ? nextEpochStake(source) : 0;
+    const srcComm = source?.commission ?? 0;
+    const tgtStake = nextEpochStake(target);
+    const tgtComm = target.commission;
+
+    const srcEffCommBefore = effectiveComm(srcStake, srcComm);
+    const tgtEffCommBefore = effectiveComm(tgtStake, tgtComm);
+
+    // After this user's restake on top of already-pending operations
+    const srcEffCommAfter = effectiveComm(Math.max(0, srcStake - moveAmount), srcComm);
+    const tgtEffCommAfter = effectiveComm(tgtStake + moveAmount, tgtComm);
+
+    // Scale yields by (1 - newEffComm) / (1 - oldEffComm)
+    const scaleYield = (yield_: number, effBefore: number, effAfter: number) => {
+        const factor = (1 - effBefore / 100);
+        if (factor <= 0) return 0;
+        return yield_ * (1 - effAfter / 100) / factor;
+    };
+
+    const estTargetYield = scaleYield(target.perEpochYield, tgtEffCommBefore, tgtEffCommAfter);
+
+    return {
+        estSourceYield: source
+            ? scaleYield(source.perEpochYield, srcEffCommBefore, srcEffCommAfter)
+            : 0,
+        estTargetYield,
+        estTargetApy: Math.max(0, estTargetYield * 365 * 100),
+    };
 }
 
 // ── Break-even calculation helper ────────────────────────────────────
@@ -267,8 +344,10 @@ export default function OptimizerPage() {
                     <h2>Suggestions</h2>
                     <div className="optimizer-warning">
                         Restaking moves your stake atomically, but the new stake is pending for ~1
-                        epoch before it earns rewards. You effectively lose ~1 epoch of rewards
-                        during the transition.
+                        epoch before it earns rewards. Rewards are credited at epoch boundaries
+                        using the pre-epoch exchange rate, so you lose ~1 epoch of rewards during
+                        the transition. The break-even estimate below shows how many epochs the
+                        higher APY needs to make up for that lost reward.
                     </div>
                     <div className="stakes-list">
                         {suggestions.map((s) => (
@@ -277,6 +356,7 @@ export default function OptimizerPage() {
                                 stake={s}
                                 rankedValidators={rankedValidators}
                                 bestValidator={bestValidator!}
+                                totalNetworkStake={Number(systemState?.totalStake ?? '0') / 1e9}
                             />
                         ))}
                     </div>
@@ -334,10 +414,12 @@ function SuggestionItem({
     stake: s,
     rankedValidators,
     bestValidator,
+    totalNetworkStake,
 }: {
     stake: StakeEntry;
     rankedValidators: ValidatorApyInfo[];
     bestValidator: ValidatorApyInfo;
+    totalNetworkStake: number;
 }) {
     const [targetAddress, setTargetAddress] = useState(bestValidator.address);
     const account = useCurrentAccount();
@@ -350,8 +432,16 @@ function SuggestionItem({
     const targetValidator = rankedValidators.find((v) => v.address === targetAddress) ?? bestValidator;
     const principalIota = Number(s.principal) / 1e9;
     const currentYield = s.currentValidator?.perEpochYield ?? 0;
-    const { breakEvenEpochs } = computeBreakEven(principalIota, currentYield, targetValidator.perEpochYield);
-    const apyDiff = targetValidator.apy - (s.currentValidator?.apy ?? 0);
+    const currentRewardPerEpoch = principalIota * currentYield;
+
+    // Estimate post-restake yields accounting for stake shift and pending operations
+    const { estTargetYield, estTargetApy } = estimatePostRestakeYield(
+        s.currentValidator, targetValidator, principalIota, totalNetworkStake,
+    );
+    const estRewardPerEpoch = principalIota * estTargetYield;
+    const rewardDiffPerEpoch = estRewardPerEpoch - currentRewardPerEpoch;
+    const { lostReward, breakEvenEpochs } = computeBreakEven(principalIota, currentYield, estTargetYield);
+    const apyDiff = estTargetApy - (s.currentValidator?.apy ?? 0);
 
     async function handleRestake() {
         if (!account) return;
@@ -406,13 +496,19 @@ function SuggestionItem({
                     </div>
                 )}
                 <div className="stake-detail">
-                    <span className="label">Current</span>
+                    <span className="label">Current validator</span>
                     <span className="value">
                         {s.currentValidator
                             ? `${s.currentValidator.name} — ${s.currentValidator.apy.toFixed(2)}% APY`
                             : `${s.validatorAddress.slice(0, 10)}... (candidate — no APY)`}
                     </span>
                 </div>
+                {s.currentValidator && (
+                    <div className="stake-detail">
+                        <span className="label">Current reward/epoch</span>
+                        <span className="value">~{currentRewardPerEpoch.toFixed(4)} IOTA</span>
+                    </div>
+                )}
 
                 <div className="stake-detail target-row">
                     <span className="label">Restake to</span>
@@ -430,29 +526,45 @@ function SuggestionItem({
                     </select>
                 </div>
 
-                {apyDiff > 0 && s.currentValidator && (
-                    <div className="stake-detail">
-                        <span className="label">Break-even</span>
-                        <span className="value">
-                            {breakEvenEpochs === Infinity
-                                ? 'Never'
-                                : `~${breakEvenEpochs} epochs (~${breakEvenEpochs} days)`}
-                        </span>
-                    </div>
-                )}
-                {apyDiff > 0 && (
-                    <div className="stake-detail">
-                        <span className="label">APY improvement</span>
-                        <span className="value status-active">+{apyDiff.toFixed(2)}%</span>
-                    </div>
-                )}
-                {apyDiff <= 0 && targetAddress !== s.validatorAddress && (
-                    <div className="stake-detail">
-                        <span className="label">APY change</span>
-                        <span className="value" style={{ color: 'var(--error)' }}>
-                            {apyDiff.toFixed(2)}% (worse or equal)
-                        </span>
-                    </div>
+                {targetAddress !== s.validatorAddress && (
+                    <>
+                        <div className="stake-detail">
+                            <span className="label">Est. APY after restake</span>
+                            <span className={`value ${apyDiff > 0 ? 'status-active' : ''}`} style={apyDiff <= 0 ? { color: 'var(--error)' } : undefined}>
+                                {estTargetApy.toFixed(2)}%{' '}
+                                <span className="hint-inline">
+                                    ({apyDiff >= 0 ? '+' : ''}{apyDiff.toFixed(2)}% vs current, was {targetValidator.apy.toFixed(2)}% historical)
+                                </span>
+                            </span>
+                        </div>
+                        <div className="stake-detail">
+                            <span className="label">Est. reward/epoch after</span>
+                            <span className={`value ${rewardDiffPerEpoch > 0 ? 'status-active' : ''}`} style={rewardDiffPerEpoch <= 0 ? { color: 'var(--error)' } : undefined}>
+                                ~{estRewardPerEpoch.toFixed(4)} IOTA{' '}
+                                <span className="hint-inline">
+                                    ({rewardDiffPerEpoch >= 0 ? '+' : ''}{rewardDiffPerEpoch.toFixed(4)} IOTA/epoch)
+                                </span>
+                            </span>
+                        </div>
+                        {s.currentValidator && (
+                            <div className="break-even-info">
+                                <div className="stake-detail">
+                                    <span className="label">Lost reward (1 epoch)</span>
+                                    <span className="value" style={{ color: 'var(--error)' }}>
+                                        ~{lostReward.toFixed(4)} IOTA
+                                    </span>
+                                </div>
+                                <div className="stake-detail">
+                                    <span className="label">Break-even</span>
+                                    <span className="value" style={breakEvenEpochs === Infinity ? { color: 'var(--error)' } : undefined}>
+                                        {breakEvenEpochs === Infinity
+                                            ? apyDiff <= 0 ? 'Never — estimated APY is worse or equal' : 'Never'
+                                            : `~${breakEvenEpochs} epoch${breakEvenEpochs !== 1 ? 's' : ''} (~${breakEvenEpochs} day${breakEvenEpochs !== 1 ? 's' : ''})`}
+                                    </span>
+                                </div>
+                            </div>
+                        )}
+                    </>
                 )}
             </div>
             <div className="optimizer-actions">
