@@ -125,31 +125,27 @@ async function fetchExchangeRateHistory(
     }
 }
 
-// ── Hook: fetch previous epoch's total stake rewards ────────────────
+// ── Hook: fetch validator_target_reward from protocol config ─────────
 
-function usePrevEpochReward() {
+function useTargetReward() {
     const client = useIotaClient();
 
     return useQuery({
-        queryKey: ['prev-epoch-reward'],
+        queryKey: ['target-reward'],
         queryFn: async () => {
-            const page = await client.getEpochs({
-                limit: 2,
-                descendingOrder: true,
-            });
-            // page.data[0] is the current epoch (no endOfEpochInfo),
-            // page.data[1] is the previous completed epoch
-            const prev = page.data.find((e) => e.endOfEpochInfo != null);
-            if (!prev?.endOfEpochInfo) return 0;
-            return Number(prev.endOfEpochInfo.totalStakeRewardsDistributed) / 1e9;
+            const config = await client.getProtocolConfig();
+            const val = config.attributes?.validator_target_reward;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const nanos = Number((val as any)?.u64 ?? 0);
+            return nanos / 1e9; // convert to IOTA
         },
-        staleTime: 60_000,
+        staleTime: 300_000,
     });
 }
 
 // ── Hook: fetch APY history for ALL active validators ───────────────
 
-function useAllValidatorApys(validators: IotaValidatorSummary[], prevEpochReward: number) {
+function useAllValidatorApys(validators: IotaValidatorSummary[], targetReward: number) {
     const client = useIotaClient();
 
     const validatorIds = useMemo(
@@ -158,7 +154,7 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], prevEpochReward
     );
 
     return useQuery({
-        queryKey: ['all-validator-apys', validatorIds, prevEpochReward],
+        queryKey: ['all-validator-apys', validatorIds],
         queryFn: async () => {
             const results = new Map<string, ValidatorApyInfo>();
 
@@ -179,10 +175,10 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], prevEpochReward
                     );
 
                     // Simulate advance_epoch reward calculation:
-                    // 1. validator's share of total reward = votingPower / 10000
+                    // 1. validator's share = votingPower / 10000 × validator_target_reward
                     // 2. commission extracted at effective rate
                     // 3. remainder goes to delegators
-                    const validatorGrossReward = prevEpochReward * votingPowerBps / 10_000;
+                    const validatorGrossReward = targetReward * votingPowerBps / 10_000;
                     const commission = validatorGrossReward * effectiveCommBps / 10_000;
                     const stakerReward = validatorGrossReward - commission;
 
@@ -296,12 +292,12 @@ export default function OptimizerPage() {
         { enabled: !!account },
     );
 
-    // Fetch previous epoch's total stake rewards (used to simulate current epoch)
-    const { data: prevEpochReward } = usePrevEpochReward();
+    // Fetch target reward from protocol config
+    const { data: targetReward } = useTargetReward();
 
     // Fetch APY history for ALL active validators
     const { data: allApys, isPending: apysPending } =
-        useAllValidatorApys(activeValidators, prevEpochReward ?? 0);
+        useAllValidatorApys(activeValidators, targetReward ?? 0);
 
     // Resolve names for candidate validators not in the active set
     const { data: candidateNames } = useCandidateValidatorNames(
@@ -555,7 +551,7 @@ export default function OptimizerPage() {
                                 <span className={`rank-col-apy ${v.isAnomalous ? 'apy-anomalous' : ''}`}>
                                     {v.latestApy > 0 ? `${v.latestApy.toFixed(2)}%` : '—'}
                                 </span>
-                                <span className="rank-col-reward" title={`Estimated delegator reward if epoch ended now (based on prev epoch total: ${formatIota(BigInt(Math.round((prevEpochReward ?? 0) * 1e9)), 0)} IOTA)`}>
+                                <span className="rank-col-reward" title="Estimated delegator reward for this epoch based on current voting power and commission">
                                     {v.estEpochReward > 0 ? `${formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)}` : '—'}
                                 </span>
                             </div>
