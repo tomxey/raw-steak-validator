@@ -39,7 +39,7 @@ interface ValidatorApyInfo {
     poolStake: number; // total IOTA in the staking pool (in IOTA, not nanos)
     pendingStake: number; // pending incoming stake (IOTA)
     pendingWithdraw: number; // pending withdrawals (IOTA)
-    estEpochReward: number; // simulated delegator reward for current epoch (IOTA)
+    estEpochReward: number; // simulated delegator reward per 10k IOTA staked (IOTA)
     estCurrentApy: number; // estimated APY for current epoch based on protocol params
 }
 
@@ -209,7 +209,9 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], targetReward: n
                         poolStake,
                         pendingStake,
                         pendingWithdraw,
-                        estEpochReward: stakerReward,
+                        estEpochReward: effectivePool > 0
+                            ? (stakerReward / effectivePool) * 10_000
+                            : 0,
                         estCurrentApy,
                     });
                 }),

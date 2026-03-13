@@ -91,7 +91,7 @@ export default function ValidatorDetail({ validator: v, onClose, showAdvisory = 
                         </div>
                     )}
 
-                    <h3>Reward per IOTA per Epoch</h3>
+                    <h3>Reward per 10,000 IOTA per Epoch</h3>
                     <EpochYieldChart
                         yields={v.epochYields}
                         avg7Apy={v.avg7Apy}
@@ -123,9 +123,9 @@ export default function ValidatorDetail({ validator: v, onClose, showAdvisory = 
                         </div>
                         {v.estEpochReward > 0 && (
                             <div className="detail-item">
-                                <span className="label">Est. Epoch Reward (delegators)</span>
+                                <span className="label">Est. Reward / 10k IOTA / Epoch</span>
                                 <span className="value reward">
-                                    {formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)} IOTA
+                                    {v.estEpochReward.toFixed(2)} IOTA
                                 </span>
                             </div>
                         )}

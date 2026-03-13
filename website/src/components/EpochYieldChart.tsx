@@ -22,14 +22,14 @@ export default function EpochYieldChart({
         return <div className="chart-empty">No epoch yield data available</div>;
     }
 
-    // Convert yields to reward-per-IOTA (perEpochYield is already fractional)
-    const rewardPerIota = yields.map((y) => y.perEpochYield);
-    const maxReward = Math.max(...rewardPerIota, 0);
-    const minReward = Math.min(...rewardPerIota, 0);
+    // Convert yields to reward per 10,000 IOTA staked
+    const rewardPer10k = yields.map((y) => y.perEpochYield * 10_000);
+    const maxReward = Math.max(...rewardPer10k, 0);
+    const minReward = Math.min(...rewardPer10k, 0);
 
-    // Avg lines in per-epoch-yield units
-    const avg7Yield = avg7Apy / (365 * 100);
-    const avg30Yield = avg30Apy / (365 * 100);
+    // Avg lines in per-10k-IOTA units
+    const avg7Yield = avg7Apy / (365 * 100) * 10_000;
+    const avg30Yield = avg30Apy / (365 * 100) * 10_000;
 
     const padding = { top: 20, right: 20, bottom: 30, left: 60 };
     const chartW = width - padding.left - padding.right;
@@ -128,7 +128,7 @@ export default function EpochYieldChart({
                 {/* Bars */}
                 {yields.map((y, i) => {
                     const x = padding.left + i * (barWidth + barGap);
-                    const reward = rewardPerIota[i];
+                    const reward = rewardPer10k[i];
                     const barH = Math.abs(yScale(0) - yScale(reward));
                     const barY = reward >= 0
                         ? padding.top + yScale(reward)
@@ -199,7 +199,7 @@ export default function EpochYieldChart({
                 <div className="chart-tooltip">
                     <strong>Epoch {yields[hoveredIndex].epoch}</strong>
                     <br />
-                    Reward/IOTA: {formatRewardLabel(rewardPerIota[hoveredIndex])}
+                    Reward per 10k IOTA: {rewardPer10k[hoveredIndex].toFixed(2)} IOTA
                     <br />
                     APY: {yields[hoveredIndex].annualizedApy.toFixed(2)}%
                 </div>
@@ -210,9 +210,6 @@ export default function EpochYieldChart({
 
 function formatRewardLabel(value: number): string {
     if (value === 0) return '0';
-    if (Math.abs(value) >= 0.001) return value.toFixed(4);
-    // Use scientific-ish notation for very small values
-    const exp = Math.floor(Math.log10(Math.abs(value)));
-    const mantissa = value / Math.pow(10, exp);
-    return `${mantissa.toFixed(1)}e${exp}`;
+    if (Math.abs(value) >= 1) return value.toFixed(1);
+    return value.toFixed(2);
 }
