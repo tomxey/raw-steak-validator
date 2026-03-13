@@ -15,9 +15,11 @@ interface ValidatorApyInfo {
     isAnomalous: boolean;
     anomalyFactor: number;
     epochYields: EpochYieldEntry[];
+    votingPower: number;
     poolStake: number;
     pendingStake: number;
     pendingWithdraw: number;
+    estEpochReward: number;
 }
 
 interface ValidatorDetailProps {
@@ -114,6 +116,18 @@ export default function ValidatorDetail({ validator: v, onClose, showAdvisory = 
                                 {formatIota(BigInt(Math.round(v.pendingWithdraw * 1e9)), 0)} IOTA
                             </span>
                         </div>
+                        <div className="detail-item">
+                            <span className="label">Voting Power</span>
+                            <span className="value">{(v.votingPower / 100).toFixed(2)}%</span>
+                        </div>
+                        {v.estEpochReward > 0 && (
+                            <div className="detail-item">
+                                <span className="label">Est. Epoch Reward (delegators)</span>
+                                <span className="value reward">
+                                    {formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)} IOTA
+                                </span>
+                            </div>
+                        )}
                         <div className="detail-item">
                             <span className="label">Epochs of Data</span>
                             <span className="value">{v.epochYields.length}</span>

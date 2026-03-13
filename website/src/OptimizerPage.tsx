@@ -35,9 +35,11 @@ interface ValidatorApyInfo {
     isAnomalous: boolean;
     anomalyFactor: number;
     epochYields: EpochYieldEntry[];
+    votingPower: number; // basis points (0–10000)
     poolStake: number; // total IOTA in the staking pool (in IOTA, not nanos)
     pendingStake: number; // pending incoming stake (IOTA)
     pendingWithdraw: number; // pending withdrawals (IOTA)
+    estEpochReward: number; // simulated delegator reward for current epoch (IOTA)
 }
 
 interface StakeEntry {
@@ -123,9 +125,31 @@ async function fetchExchangeRateHistory(
     }
 }
 
+// ── Hook: fetch previous epoch's total stake rewards ────────────────
+
+function usePrevEpochReward() {
+    const client = useIotaClient();
+
+    return useQuery({
+        queryKey: ['prev-epoch-reward'],
+        queryFn: async () => {
+            const page = await client.getEpochs({
+                limit: 2,
+                descendingOrder: true,
+            });
+            // page.data[0] is the current epoch (no endOfEpochInfo),
+            // page.data[1] is the previous completed epoch
+            const prev = page.data.find((e) => e.endOfEpochInfo != null);
+            if (!prev?.endOfEpochInfo) return 0;
+            return Number(prev.endOfEpochInfo.totalStakeRewardsDistributed) / 1e9;
+        },
+        staleTime: 60_000,
+    });
+}
+
 // ── Hook: fetch APY history for ALL active validators ───────────────
 
-function useAllValidatorApys(validators: IotaValidatorSummary[]) {
+function useAllValidatorApys(validators: IotaValidatorSummary[], prevEpochReward: number) {
     const client = useIotaClient();
 
     const validatorIds = useMemo(
@@ -134,7 +158,7 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
     );
 
     return useQuery({
-        queryKey: ['all-validator-apys', validatorIds],
+        queryKey: ['all-validator-apys', validatorIds, prevEpochReward],
         queryFn: async () => {
             const results = new Map<string, ValidatorApyInfo>();
 
@@ -147,7 +171,21 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
                     const history = computeValidatorApyHistory(entries);
 
                     const commPct = Number(v.commissionRate) / 100;
-                    const votingPowerPct = Number(v.votingPower) / 100;
+                    const votingPowerBps = Number(v.votingPower);
+                    const votingPowerPct = votingPowerBps / 100;
+                    const effectiveCommBps = Math.max(
+                        Number(v.commissionRate),
+                        votingPowerBps,
+                    );
+
+                    // Simulate advance_epoch reward calculation:
+                    // 1. validator's share of total reward = votingPower / 10000
+                    // 2. commission extracted at effective rate
+                    // 3. remainder goes to delegators
+                    const validatorGrossReward = prevEpochReward * votingPowerBps / 10_000;
+                    const commission = validatorGrossReward * effectiveCommBps / 10_000;
+                    const stakerReward = validatorGrossReward - commission;
+
                     results.set(v.iotaAddress, {
                         address: v.iotaAddress,
                         name: v.name,
@@ -161,16 +199,18 @@ function useAllValidatorApys(validators: IotaValidatorSummary[]) {
                         isAnomalous: history.isAnomalous,
                         anomalyFactor: history.anomalyFactor,
                         epochYields: history.epochYields,
+                        votingPower: votingPowerBps,
                         poolStake: Number(v.stakingPoolIotaBalance) / 1e9,
                         pendingStake: Number(v.pendingStake) / 1e9,
                         pendingWithdraw: Number(v.pendingTotalIotaWithdraw) / 1e9,
+                        estEpochReward: stakerReward,
                     });
                 }),
             );
 
             return results;
         },
-        enabled: validators.length > 0,
+        enabled: validators.length > 0 && prevEpochReward > 0,
         staleTime: 60_000,
     });
 }
@@ -256,9 +296,12 @@ export default function OptimizerPage() {
         { enabled: !!account },
     );
 
+    // Fetch previous epoch's total stake rewards (used to simulate current epoch)
+    const { data: prevEpochReward } = usePrevEpochReward();
+
     // Fetch APY history for ALL active validators
     const { data: allApys, isPending: apysPending } =
-        useAllValidatorApys(activeValidators);
+        useAllValidatorApys(activeValidators, prevEpochReward ?? 0);
 
     // Resolve names for candidate validators not in the active set
     const { data: candidateNames } = useCandidateValidatorNames(
@@ -481,6 +524,7 @@ export default function OptimizerPage() {
                             <span className="rank-col-apy">7d APY</span>
                             <span className="rank-col-apy">30d APY</span>
                             <span className="rank-col-apy">Latest</span>
+                            <span className="rank-col-reward">Est. Reward</span>
                         </div>
                         {rankedValidators.map((v, i) => (
                             <div
@@ -510,6 +554,9 @@ export default function OptimizerPage() {
                                 </span>
                                 <span className={`rank-col-apy ${v.isAnomalous ? 'apy-anomalous' : ''}`}>
                                     {v.latestApy > 0 ? `${v.latestApy.toFixed(2)}%` : '—'}
+                                </span>
+                                <span className="rank-col-reward" title={`Estimated delegator reward if epoch ended now (based on prev epoch total: ${formatIota(BigInt(Math.round((prevEpochReward ?? 0) * 1e9)), 0)} IOTA)`}>
+                                    {v.estEpochReward > 0 ? `${formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)}` : '—'}
                                 </span>
                             </div>
                         ))}
