@@ -40,6 +40,7 @@ interface ValidatorApyInfo {
     pendingStake: number; // pending incoming stake (IOTA)
     pendingWithdraw: number; // pending withdrawals (IOTA)
     estEpochReward: number; // simulated delegator reward for current epoch (IOTA)
+    estCurrentApy: number; // estimated APY for current epoch based on protocol params
 }
 
 interface StakeEntry {
@@ -182,6 +183,15 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], targetReward: n
                     const commission = validatorGrossReward * effectiveCommBps / 10_000;
                     const stakerReward = validatorGrossReward - commission;
 
+                    // Effective pool after pending operations (what delegators share)
+                    const poolStake = Number(v.stakingPoolIotaBalance) / 1e9;
+                    const pendingStake = Number(v.pendingStake) / 1e9;
+                    const pendingWithdraw = Number(v.pendingTotalIotaWithdraw) / 1e9;
+                    const effectivePool = poolStake - pendingWithdraw + pendingStake;
+                    const estCurrentApy = effectivePool > 0
+                        ? (stakerReward / effectivePool) * 365 * 100
+                        : 0;
+
                     results.set(v.iotaAddress, {
                         address: v.iotaAddress,
                         name: v.name,
@@ -196,10 +206,11 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], targetReward: n
                         anomalyFactor: history.anomalyFactor,
                         epochYields: history.epochYields,
                         votingPower: votingPowerBps,
-                        poolStake: Number(v.stakingPoolIotaBalance) / 1e9,
-                        pendingStake: Number(v.pendingStake) / 1e9,
-                        pendingWithdraw: Number(v.pendingTotalIotaWithdraw) / 1e9,
+                        poolStake,
+                        pendingStake,
+                        pendingWithdraw,
                         estEpochReward: stakerReward,
+                        estCurrentApy,
                     });
                 }),
             );
@@ -520,7 +531,7 @@ export default function OptimizerPage() {
                             <span className="rank-col-apy">7d APY</span>
                             <span className="rank-col-apy">30d APY</span>
                             <span className="rank-col-apy">Latest</span>
-                            <span className="rank-col-reward">Est. Reward</span>
+                            <span className="rank-col-apy">Est. APY</span>
                         </div>
                         {rankedValidators.map((v, i) => (
                             <div
@@ -551,8 +562,8 @@ export default function OptimizerPage() {
                                 <span className={`rank-col-apy ${v.isAnomalous ? 'apy-anomalous' : ''}`}>
                                     {v.latestApy > 0 ? `${v.latestApy.toFixed(2)}%` : '—'}
                                 </span>
-                                <span className="rank-col-reward" title="Estimated delegator reward for this epoch based on current voting power and commission">
-                                    {v.estEpochReward > 0 ? `${formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)}` : '—'}
+                                <span className="rank-col-apy" title="Estimated APY for current epoch based on protocol target reward, voting power, and effective commission">
+                                    {v.estCurrentApy > 0 ? `${v.estCurrentApy.toFixed(2)}%` : '—'}
                                 </span>
                             </div>
                         ))}

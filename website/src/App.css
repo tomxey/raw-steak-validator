@@ -593,21 +593,6 @@ body {
     font-weight: 500;
 }
 
-.rank-col-reward {
-    width: 80px;
-    flex-shrink: 0;
-    text-align: right;
-    font-weight: 500;
-    color: var(--reward);
-    font-size: 0.75rem;
-}
-
-.rank-header .rank-col-reward {
-    color: var(--text-muted);
-    font-weight: 600;
-    font-size: 0.7rem;
-}
-
 .rank-row-clickable {
     cursor: pointer;
 }

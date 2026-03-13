@@ -20,6 +20,7 @@ interface ValidatorApyInfo {
     pendingStake: number;
     pendingWithdraw: number;
     estEpochReward: number;
+    estCurrentApy: number;
 }
 
 interface ValidatorDetailProps {
@@ -126,6 +127,12 @@ export default function ValidatorDetail({ validator: v, onClose, showAdvisory = 
                                 <span className="value reward">
                                     {formatIota(BigInt(Math.round(v.estEpochReward * 1e9)), 0)} IOTA
                                 </span>
+                            </div>
+                        )}
+                        {v.estCurrentApy > 0 && (
+                            <div className="detail-item">
+                                <span className="label">Est. Current Epoch APY</span>
+                                <span className="value accent">{v.estCurrentApy.toFixed(2)}%</span>
                             </div>
                         )}
                         <div className="detail-item">
