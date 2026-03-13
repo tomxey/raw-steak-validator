@@ -210,7 +210,7 @@ function useAllValidatorApys(validators: IotaValidatorSummary[], prevEpochReward
 
             return results;
         },
-        enabled: validators.length > 0 && prevEpochReward > 0,
+        enabled: validators.length > 0,
         staleTime: 60_000,
     });
 }
