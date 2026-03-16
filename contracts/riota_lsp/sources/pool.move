@@ -8,10 +8,10 @@
 ///   - No oracle: all value computations use on-chain staking-pool exchange-rate
 ///     tables (Table<epoch, PoolTokenExchangeRate>). Total pool value is derived
 ///     from per-vault pool-token counts — O(N validators), no stake iteration.
-///   - Swap: user gives high-APY stake → gets low-APY stake of equal current
-///     value + an immediate rIOTA reward estimated from the median per-epoch
-///     yield differential over the last MEDIAN_WINDOW epochs (trustless,
-///     derived entirely from on-chain exchange-rate history).
+///   - Swap: user gives high-APY stake → deposit into pool (mint rIOTA) →
+///     withdraw using that rIOTA (drain worst-APY vaults) → reward based on
+///     the 7-day pool APY improvement (weighted median of per-validator yields).
+///     Trustless, derived entirely from on-chain exchange-rate history.
 module raw_steak::pool {
     use iota::coin::{Self, TreasuryCap, CoinMetadata, Coin};
     use iota::event;
@@ -310,16 +310,46 @@ module raw_steak::pool {
 
         let current_epoch = ctx.epoch();
         refresh_rates(pool, system, current_epoch);
-        let riota_amount  = coin::value(&riota);
-        let riota_supply  = coin::total_supply(&pool.treasury_cap);
-        let pool_value = total_pool_value(pool);
 
+        // Pre-compute value_out for the min_stake check (drain_and_burn burns the coin).
+        let riota_amount = coin::value(&riota);
+        let riota_supply = coin::total_supply(&pool.treasury_cap);
+        let pool_value   = total_pool_value(pool);
         let value_out = if (riota_amount == riota_supply) {
             pool_value
         } else {
             (((riota_amount as u256) * (pool_value as u256)) / (riota_supply as u256)) as u64
         };
         assert!(value_out >= pool.min_stake, EBelowMinStake);
+
+        let (stakes, refund, actual_value, actual_burned) =
+            drain_and_burn(pool, system, riota, ctx);
+
+        event::emit(WithdrawnEvent {
+            staker: ctx.sender(),
+            riota_burned: actual_burned,
+            value_returned: actual_value,
+        });
+        (stakes, refund)
+    }
+
+    /// Internal: burn rIOTA, drain worst-APY vaults, return stakes + dust refund.
+    /// Does NOT check paused/allowed/min_stake — caller must validate.
+    fun drain_and_burn(
+        pool: &mut Pool,
+        system: &mut IotaSystemState,
+        riota: Coin<RIOTA>,
+        ctx: &mut TxContext,
+    ): (vector<StakedIota>, Coin<RIOTA>, u64 /*value_returned*/, u64 /*riota_burned*/) {
+        let riota_amount = coin::value(&riota);
+        let riota_supply = coin::total_supply(&pool.treasury_cap);
+        let pool_value   = total_pool_value(pool);
+
+        let value_out = if (riota_amount == riota_supply) {
+            pool_value
+        } else {
+            (((riota_amount as u256) * (pool_value as u256)) / (riota_supply as u256)) as u64
+        };
 
         coin::burn(&mut pool.treasury_cap, riota);
 
@@ -345,12 +375,7 @@ module raw_steak::pool {
         } else { 0 };
         let refund = coin::mint(&mut pool.treasury_cap, refund_amount, ctx);
 
-        event::emit(WithdrawnEvent {
-            staker: ctx.sender(),
-            riota_burned: riota_amount - refund_amount,
-            value_returned: value_out - remaining,
-        });
-        (result, refund)
+        (result, refund, value_out - remaining, riota_amount - refund_amount)
     }
 
     // ===== Core: swap =====
@@ -361,8 +386,11 @@ module raw_steak::pool {
         stake_x: StakedIota,
         ctx: &mut TxContext,
     ) {
-        let (stake_y, reward) = swap_non_entry(pool, system, stake_x, ctx);
-        transfer::public_transfer(stake_y, ctx.sender());
+        let (mut stakes, reward) = swap_multi_non_entry(pool, system, stake_x, ctx);
+        while (stakes.length() > 0) {
+            transfer::public_transfer(stakes.pop_back(), ctx.sender());
+        };
+        stakes.destroy_empty();
         if (coin::value(&reward) > 0) {
             transfer::public_transfer(reward, ctx.sender());
         } else {
@@ -370,12 +398,25 @@ module raw_steak::pool {
         };
     }
 
+    /// Deprecated: use swap_multi_non_entry instead.
     public fun swap_non_entry(
+        _pool: &mut Pool,
+        _system: &mut IotaSystemState,
+        _stake_x: StakedIota,
+        _ctx: &mut TxContext,
+    ): (StakedIota, Coin<RIOTA>) {
+        abort EDeprecated
+    }
+
+    /// Swap: deposit user's high-APY stake (mint rIOTA), then withdraw using
+    /// that rIOTA (drain worst-APY vaults). Reward = 7-day pool earnings
+    /// improvement from the APY uplift. Aborts if pool APY doesn't improve.
+    public fun swap_multi_non_entry(
         pool: &mut Pool,
         system: &mut IotaSystemState,
         stake_x: StakedIota,
         ctx: &mut TxContext,
-    ): (StakedIota, Coin<RIOTA>) {
+    ): (vector<StakedIota>, Coin<RIOTA>) {
         assert!(!pool.paused, EPoolPaused);
         assert_allowed(pool, ctx);
         assert!(pool.validators.length() > 0, ENoValidators);
@@ -388,49 +429,47 @@ module raw_steak::pool {
         let principal_x = staking_pool::staked_iota_amount(&stake_x);
         assert!(principal_x >= pool.min_stake, EBelowMinStake);
 
+        // Pre-deposit info for event.
         let validator_x = validator_for_stake(pool, system, &stake_x);
-        let validator_y = worst_apy_validator(pool);
-
-        let pool_id_x = pool.vaults.borrow(validator_x).pool_id;
-        let pool_id_y = pool.vaults.borrow(validator_y).pool_id;
-
-        // Median per-epoch yield over the last MEDIAN_WINDOW epochs.
-        // Using median filters out reward spikes from large withdrawals.
-        let yield_x = median_yield(system, pool_id_x, current_epoch);
-        let yield_y = median_yield(system, pool_id_y, current_epoch);
-        assert!(yield_x > yield_y, ENoImprovement);
-
-        // Compute actual current IOTA value of stake_x (principal + rewards).
         let value_x = compute_stake_value(pool, system, validator_x, principal_x, epoch_x);
 
-        // Give user a stake of equal current value from the worst-APY vault.
-        let stake_y = vault_take_by_value(pool, validator_y, value_x, system, ctx);
+        // Snapshot BEFORE.
+        let apy_before        = pool_weighted_median_yield(pool, system, current_epoch);
+        let pool_value_before = total_pool_value(pool);
 
-        // Add the user's high-APY stake into the pool.
-        vault_add_stake(pool, validator_x, stake_x, principal_x, system);
+        // 1. DEPOSIT: stake → rIOTA.
+        let riota = add_active_stake_non_entry(pool, system, stake_x, ctx);
 
-        // Reward: estimated extra IOTA the pool earns over APY_WINDOW epochs
-        // thanks to the higher-yield stake, converted to rIOTA.
-        //   extra_iota = value_x × APY_WINDOW × (yield_x − yield_y) / 1e18
-        //   reward_riota = extra_iota × riota_supply / pool_value
-        let riota_sup = coin::total_supply(&pool.treasury_cap) as u256;
-        let pool_val  = total_pool_value(pool) as u256;
-        let extra_iota = (value_x as u256) * (APY_WINDOW as u256) * (yield_x - yield_y)
-            / YIELD_PRECISION;
-        let reward_riota = if (riota_sup == 0 || pool_val == 0) {
-            extra_iota as u64
-        } else {
-            (extra_iota * riota_sup / pool_val) as u64
-        };
+        // 2. WITHDRAW: rIOTA → stakes from worst-APY vaults.
+        let (result, mut refund, _, _) = drain_and_burn(pool, system, riota, ctx);
 
-        let reward = coin::mint(&mut pool.treasury_cap, reward_riota, ctx);
+        // Snapshot AFTER.
+        let apy_after        = pool_weighted_median_yield(pool, system, current_epoch);
+        assert!(apy_after > apy_before, ENoImprovement);
+        let pool_value_after = total_pool_value(pool) as u256;
+
+        // 3. REWARD: expected 7-day pool earnings improvement.
+        //   earn_before = pool_value_before × APY_WINDOW × apy_before / YIELD_PRECISION
+        //   earn_after  = pool_value_after  × APY_WINDOW × apy_after  / YIELD_PRECISION
+        //   improvement = earn_after − earn_before
+        //   reward_riota = improvement × riota_supply / pool_value_after
+        let riota_supply = coin::total_supply(&pool.treasury_cap) as u256;
+        let earn_before  = (pool_value_before as u256) * (APY_WINDOW as u256) * apy_before;
+        let earn_after   = pool_value_after * (APY_WINDOW as u256) * apy_after;
+        let improvement  = (earn_after - earn_before) / YIELD_PRECISION;
+        let reward_amount = if (pool_value_after > 0) {
+            (improvement * riota_supply / pool_value_after) as u64
+        } else { 0 };
+
+        let reward = coin::mint(&mut pool.treasury_cap, reward_amount, ctx);
+        refund.join(reward);
 
         event::emit(SwappedEvent {
             swapper: ctx.sender(),
-            validator_in: validator_x, validator_out: validator_y,
-            value_swapped: value_x, riota_reward: reward_riota,
+            validator_in: validator_x, validator_out: validator_x,
+            value_swapped: value_x, riota_reward: reward_amount,
         });
-        (stake_y, reward)
+        (result, refund)
     }
 
 
@@ -438,6 +477,17 @@ module raw_steak::pool {
 
     public fun riota_supply(pool: &Pool): u64 { coin::total_supply(&pool.treasury_cap) }
     public fun validators(pool: &Pool): &vector<address> { &pool.validators }
+
+    /// Pool-wide weighted median per-epoch yield (scaled by YIELD_PRECISION = 1e18).
+    /// Call via devInspectTransactionBlock for a read-only view.
+    public fun pool_apy(
+        pool: &mut Pool,
+        system: &mut IotaSystemState,
+        ctx: &TxContext,
+    ): u256 {
+        refresh_rates(pool, system, ctx.epoch());
+        pool_weighted_median_yield(pool, system, ctx.epoch())
+    }
 
     // ===== Internal helpers =====
 
@@ -596,6 +646,37 @@ module raw_steak::pool {
             i = i + 1;
         };
         if (total > MAX_U64) { MAX_U64 as u64 } else { total as u64 }
+    }
+
+    /// Weighted average of per-validator median yields, weighted by vault IOTA value.
+    /// Returns the pool's aggregate per-epoch yield scaled by YIELD_PRECISION.
+    fun pool_weighted_median_yield(
+        pool: &Pool,
+        system: &mut IotaSystemState,
+        current_epoch: u64,
+    ): u256 {
+        let mut total_weight: u256 = 0;
+        let mut weighted_sum: u256 = 0;
+        let mut i = 0;
+        while (i < pool.validators.length()) {
+            let v     = *pool.validators.borrow(i);
+            let vault = pool.vaults.borrow(v);
+            let vault_value: u256 = if (vault.total_pool_tokens > 0) {
+                let (c_iota, c_tokens) = cached_rate(pool, v);
+                if (c_tokens > 0) {
+                    (vault.total_pool_tokens as u256) * c_iota / c_tokens
+                } else {
+                    (vault.total_staked as u256)
+                }
+            } else { 0 };
+            if (vault_value > 0) {
+                let yield_v = median_yield(system, vault.pool_id, current_epoch);
+                weighted_sum = weighted_sum + vault_value * yield_v;
+                total_weight = total_weight + vault_value;
+            };
+            i = i + 1;
+        };
+        if (total_weight == 0) { 0 } else { weighted_sum / total_weight }
     }
 
     /// Add a stake to its validator's vault. Merges with the last entry if

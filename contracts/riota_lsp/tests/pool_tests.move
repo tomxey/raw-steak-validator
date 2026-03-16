@@ -461,7 +461,7 @@ fun test_swap_value_neutral() {
 
     // Stake both users at epoch 0 for later use.
     stake_with(STAKER_A, VAL_1, 10, &mut scenario); // high-APY stake for user
-    stake_with(STAKER_B, VAL_2, 10, &mut scenario); // low-APY stake for pool
+    stake_with(STAKER_B, VAL_2, 20, &mut scenario); // low-APY stake for pool (enough to cover swap)
 
     // Advance 1 epoch to activate, then 7 epochs giving ALL rewards to VAL_1.
     advance_epoch(&mut scenario);
@@ -562,7 +562,7 @@ fun test_swap_pays_estimated_reward() {
     setup_system(&mut scenario);
 
     stake_with(STAKER_A, VAL_1, 10, &mut scenario);
-    stake_with(STAKER_B, VAL_2, 10, &mut scenario);
+    stake_with(STAKER_B, VAL_2, 20, &mut scenario);
     advance_epoch(&mut scenario);
 
     // 7 epochs: VAL_1 earns all rewards → builds up APY advantage (needed for

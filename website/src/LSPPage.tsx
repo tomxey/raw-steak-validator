@@ -6,10 +6,13 @@ import {
     useIotaClient,
 } from '@iota/dapp-kit';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LSP_PACKAGE_ID, LSP_POOL_ID, RIOTA_COIN_TYPE } from './constants';
+import { Transaction } from '@iota/iota-sdk/transactions';
+import { IOTA_SYSTEM_STATE_OBJECT_ID } from '@iota/iota-sdk/utils';
+import { LSP_PACKAGE_ID, LSP_POOL_ID, LSP_POOL_INITIAL_SHARED_VERSION, RIOTA_COIN_TYPE } from './constants';
 import {
     createLspDepositTransaction,
     createLspWithdrawTransaction,
+    createLspSwapTransaction,
     createAddValidatorTransaction,
 } from './lib/transactions';
 import { formatIota, waitAndCheckTx } from './lib/utils';
@@ -62,6 +65,7 @@ function usePoolValue(poolData: PoolData | undefined) {
                         client.getDynamicFieldObject({
                             parentObjectId: poolData.vaultsTableId,
                             name: { type: 'address', value: v },
+                            options: { showContent: true },
                         }),
                         client.getDynamicFieldObject({
                             parentObjectId: LSP_POOL_ID,
@@ -69,15 +73,16 @@ function usePoolValue(poolData: PoolData | undefined) {
                                 type: `${LSP_PACKAGE_ID}::pool::CachedRateKey`,
                                 value: { validator: v },
                             },
+                            options: { showContent: true },
                         }),
                     ]);
 
                     const vaultFields = (vaultRes.data?.content as AnyFields)?.fields?.value
                         ?.fields;
+                    if (!vaultFields) return 0n;
+
                     const rateFields = (rateRes.data?.content as AnyFields)?.fields?.value
                         ?.fields;
-
-                    if (!vaultFields) return 0n;
 
                     // Candidate validators have no CachedRate (no exchange rate history).
                     // Their rate is 1:1, so total_staked == IOTA value.
@@ -99,6 +104,47 @@ function usePoolValue(poolData: PoolData | undefined) {
     });
 }
 
+function usePoolApy() {
+    const client = useIotaClient();
+    return useQuery({
+        queryKey: ['lsp-pool-apy'],
+        queryFn: async (): Promise<number | null> => {
+            const tx = new Transaction();
+            tx.moveCall({
+                target: `${LSP_PACKAGE_ID}::pool::pool_apy`,
+                arguments: [
+                    tx.sharedObjectRef({
+                        objectId: LSP_POOL_ID,
+                        initialSharedVersion: LSP_POOL_INITIAL_SHARED_VERSION,
+                        mutable: true,
+                    }),
+                    tx.sharedObjectRef({
+                        objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                        initialSharedVersion: 1,
+                        mutable: true,
+                    }),
+                ],
+            });
+            const result = await client.devInspectTransactionBlock({
+                transactionBlock: tx,
+                sender: '0x0000000000000000000000000000000000000000000000000000000000000000',
+            });
+            const bytes = result.results?.[0]?.returnValues?.[0]?.[0];
+            if (!bytes || bytes.length === 0) return null;
+            // u256 BCS: 32 bytes little-endian
+            let raw = 0n;
+            for (let i = bytes.length - 1; i >= 0; i--) {
+                raw = (raw << 8n) | BigInt(bytes[i]);
+            }
+            // raw is per-epoch yield scaled by YIELD_PRECISION (1e18)
+            // Annualize: APY% ≈ per_epoch_yield × 365 × 100
+            const YIELD_PRECISION = 1_000_000_000_000_000_000n;
+            return Number(raw * 36500n) / Number(YIELD_PRECISION);
+        },
+        staleTime: 60_000,
+    });
+}
+
 function useValidatorNames() {
     const { data: systemState } = useIotaClientQuery('getLatestIotaSystemState');
     const nameMap = new Map<string, string>();
@@ -110,13 +156,17 @@ function useValidatorNames() {
     return nameMap;
 }
 
-function PoolStats({ poolData, poolValue }: { poolData: PoolData | undefined; poolValue: bigint | undefined }) {
+function PoolStats({ poolData, poolValue, poolApy }: {
+    poolData: PoolData | undefined;
+    poolValue: bigint | undefined;
+    poolApy: number | null | undefined;
+}) {
     if (!poolData) return <div className="card">Loading pool stats...</div>;
 
     const supply = poolData.riotaSupply;
     const value = poolValue ?? 0n;
     const rate = supply > 0n && value > 0n
-        ? (Number(value) / Number(supply)).toFixed(4)
+        ? (Number(value) / Number(supply)).toFixed(6)
         : supply === 0n ? '1.0000' : '...';
 
     return (
@@ -124,17 +174,23 @@ function PoolStats({ poolData, poolValue }: { poolData: PoolData | undefined; po
             <h2>Pool Stats</h2>
             <div className="validator-detail">
                 <span className="label">rIOTA Supply</span>
-                <span className="value">{formatIota(supply.toString())} rIOTA</span>
+                <span className="value">{formatIota(supply.toString(), 2)} rIOTA</span>
             </div>
             <div className="validator-detail">
                 <span className="label">Pool Value</span>
                 <span className="value">
-                    {value > 0n ? `${formatIota(value.toString())} IOTA` : supply === 0n ? '0 IOTA' : '...'}
+                    {value > 0n ? `${formatIota(value.toString(), 2)} IOTA` : supply === 0n ? '0 IOTA' : '...'}
                 </span>
             </div>
             <div className="validator-detail">
                 <span className="label">Exchange Rate</span>
                 <span className="value">1 rIOTA = {rate} IOTA</span>
+            </div>
+            <div className="validator-detail">
+                <span className="label">Pool APY</span>
+                <span className="value">
+                    {poolApy != null ? `${poolApy.toFixed(2)}%` : '...'}
+                </span>
             </div>
             <div className="validator-detail">
                 <span className="label">Validators</span>
@@ -148,6 +204,7 @@ function LSPPage() {
     const account = useCurrentAccount();
     const { data: poolData } = usePoolData();
     const { data: poolValue } = usePoolValue(poolData);
+    const { data: poolApy } = usePoolApy();
 
     const isAllowed = !poolData
         ? null
@@ -156,7 +213,7 @@ function LSPPage() {
 
     return (
         <main className="main">
-            <PoolStats poolData={poolData} poolValue={poolValue} />
+            <PoolStats poolData={poolData} poolValue={poolValue} poolApy={poolApy} />
             {!account ? (
                 <div className="card connect-prompt">
                     <p>Connect your wallet to use the Liquid Staking Pool</p>
@@ -181,6 +238,7 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
     const { data: stakes, isPending } = useIotaClientQuery('getStakes', { owner: address });
     const [pendingAction, setPendingAction] = useState<string | null>(null);
     const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+    const [swapAmounts, setSwapAmounts] = useState<Record<string, string>>({});
 
     const iotaClient = useIotaClient();
     const queryClient = useQueryClient();
@@ -220,6 +278,43 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
                     });
                     if (txCheck.ok) {
                         setStatus({ type: 'success', msg: 'Deposit successful! You received rIOTA.' });
+                    } else {
+                        setStatus({ type: 'error', msg: `Transaction failed: ${txCheck.error}` });
+                    }
+                    setPendingAction(null);
+                },
+                onError: (err) => {
+                    setStatus({ type: 'error', msg: err.message });
+                    setPendingAction(null);
+                },
+            },
+        );
+    }
+
+    async function handleSwap(stakedIotaId: string, principalNanos: bigint, swapAmountNanos: bigint | null) {
+        setStatus(null);
+        const actionKey = `swap-${stakedIotaId}`;
+        setPendingAction(actionKey);
+        // null = full swap, otherwise partial (split first)
+        const partial = swapAmountNanos !== null && swapAmountNanos < principalNanos
+            ? swapAmountNanos : null;
+        const tx = createLspSwapTransaction(stakedIotaId, partial);
+        tx.setSender(address);
+        await tx.build({ client: iotaClient });
+        signAndExecute(
+            { transaction: tx },
+            {
+                onSuccess: async ({ digest }) => {
+                    const txCheck = await waitAndCheckTx(iotaClient, digest);
+                    await queryClient.invalidateQueries({
+                        predicate: (query) => {
+                            const key = query.queryKey;
+                            return key[1] === 'getStakes' || key[1] === 'getBalance' || key[1] === 'getCoins'
+                                || key[0] === 'lsp-pool-data' || key[0] === 'lsp-pool-value';
+                        },
+                    });
+                    if (txCheck.ok) {
+                        setStatus({ type: 'success', msg: 'Swap successful! You received a lower-APY StakedIota + rIOTA reward.' });
                     } else {
                         setStatus({ type: 'error', msg: `Transaction failed: ${txCheck.error}` });
                     }
@@ -310,14 +405,59 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
                                     </div>
                                 </div>
                                 {isWhitelisted ? (
-                                    <button
-                                        className="btn-stake"
-                                        style={{ width: 'auto', padding: '8px 16px', fontSize: '0.85rem' }}
-                                        onClick={() => handleDeposit(stake.stakedIotaId)}
-                                        disabled={pendingAction === stake.stakedIotaId}
-                                    >
-                                        {pendingAction === stake.stakedIotaId ? 'Signing...' : 'Deposit'}
-                                    </button>
+                                    <div style={{ display: 'flex', gap: '8px', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                        <button
+                                            className="btn-stake"
+                                            style={{ width: 'auto', padding: '8px 16px', fontSize: '0.85rem' }}
+                                            onClick={() => handleDeposit(stake.stakedIotaId)}
+                                            disabled={pendingAction === stake.stakedIotaId}
+                                        >
+                                            {pendingAction === stake.stakedIotaId ? 'Signing...' : 'Deposit'}
+                                        </button>
+                                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                                            <input
+                                                type="number"
+                                                placeholder="IOTA"
+                                                value={swapAmounts[stake.stakedIotaId] ?? ''}
+                                                onChange={(e) => setSwapAmounts((prev) => ({ ...prev, [stake.stakedIotaId]: e.target.value }))}
+                                                style={{ width: '80px', padding: '6px 8px', fontSize: '0.8rem' }}
+                                                min={1}
+                                                step="0.1"
+                                            />
+                                            <button
+                                                className="btn-max"
+                                                style={{ padding: '6px 8px', fontSize: '0.75rem' }}
+                                                onClick={() => setSwapAmounts((prev) => ({
+                                                    ...prev,
+                                                    [stake.stakedIotaId]: (Number(stake.principal) / 1e9).toString(),
+                                                }))}
+                                            >
+                                                MAX
+                                            </button>
+                                            <button
+                                                className="btn-stake"
+                                                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.8rem', background: '#8e44ad' }}
+                                                onClick={() => {
+                                                    const raw = swapAmounts[stake.stakedIotaId];
+                                                    const amt = parseFloat(raw);
+                                                    const principalNanos = BigInt(stake.principal);
+                                                    if (!raw || isNaN(amt) || amt <= 0) {
+                                                        setStatus({ type: 'error', msg: 'Enter an amount to swap' });
+                                                        return;
+                                                    }
+                                                    const nanos = BigInt(Math.floor(amt * 1e9));
+                                                    if (nanos > principalNanos) {
+                                                        setStatus({ type: 'error', msg: 'Amount exceeds stake principal' });
+                                                        return;
+                                                    }
+                                                    handleSwap(stake.stakedIotaId, principalNanos, nanos);
+                                                }}
+                                                disabled={pendingAction === `swap-${stake.stakedIotaId}`}
+                                            >
+                                                {pendingAction === `swap-${stake.stakedIotaId}` ? 'Signing...' : 'Swap'}
+                                            </button>
+                                        </div>
+                                    </div>
                                 ) : (
                                     <button
                                         className="btn-stake"

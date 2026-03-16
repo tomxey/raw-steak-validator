@@ -146,6 +146,45 @@ export function createLspWithdrawTransaction(
     return tx;
 }
 
+export function createLspSwapTransaction(
+    stakedIotaId: string,
+    swapAmountNanos: bigint | null,
+) {
+    const tx = new Transaction();
+    tx.setGasBudget(100_000_000);
+
+    const pool = tx.sharedObjectRef({
+        objectId: LSP_POOL_ID,
+        initialSharedVersion: LSP_POOL_INITIAL_SHARED_VERSION,
+        mutable: true,
+    });
+    const system = tx.sharedObjectRef({
+        objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+        initialSharedVersion: 1,
+        mutable: true,
+    });
+
+    if (swapAmountNanos !== null) {
+        // Partial swap: split off swapAmount, swap the split portion
+        const splitStake = tx.moveCall({
+            target: '0x3::staking_pool::split',
+            arguments: [tx.object(stakedIotaId), tx.pure.u64(swapAmountNanos)],
+        });
+        tx.moveCall({
+            target: `${LSP_PACKAGE_ID}::pool::swap`,
+            arguments: [pool, system, splitStake],
+        });
+    } else {
+        // Full swap
+        tx.moveCall({
+            target: `${LSP_PACKAGE_ID}::pool::swap`,
+            arguments: [pool, system, tx.object(stakedIotaId)],
+        });
+    }
+
+    return tx;
+}
+
 export function createAddValidatorTransaction(validatorAddress: string, stakingPoolId: string) {
     const tx = new Transaction();
     tx.setGasBudget(50_000_000);
