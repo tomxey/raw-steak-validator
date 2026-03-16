@@ -6,7 +6,7 @@ import {
     useIotaClient,
 } from '@iota/dapp-kit';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LSP_ORIGINAL_PACKAGE_ID, LSP_POOL_ID, RIOTA_COIN_TYPE } from './constants';
+import { LSP_PACKAGE_ID, LSP_POOL_ID, RIOTA_COIN_TYPE } from './constants';
 import {
     createLspDepositTransaction,
     createLspWithdrawTransaction,
@@ -66,7 +66,7 @@ function usePoolValue(poolData: PoolData | undefined) {
                         client.getDynamicFieldObject({
                             parentObjectId: LSP_POOL_ID,
                             name: {
-                                type: `${LSP_ORIGINAL_PACKAGE_ID}::pool::CachedRateKey`,
+                                type: `${LSP_PACKAGE_ID}::pool::CachedRateKey`,
                                 value: { validator: v },
                             },
                         }),
