@@ -1,5 +1,6 @@
 import { Transaction } from '@iota/iota-sdk/transactions';
 import { IOTA_SYSTEM_STATE_OBJECT_ID } from '@iota/iota-sdk/utils';
+import { LSP_PACKAGE_ID, LSP_POOL_ID, LSP_POOL_INITIAL_SHARED_VERSION } from '../constants';
 
 export function createStakeTransaction(amount: bigint, validator: string) {
     const tx = new Transaction();
@@ -73,5 +74,74 @@ export function createRestakeTransaction(
     // Transfer the new StakedIota object to sender
     tx.transferObjects([newStake], tx.pure.address(sender));
 
+    return tx;
+}
+
+export function createLspDepositTransaction(stakedIotaId: string) {
+    const tx = new Transaction();
+    tx.setGasBudget(50_000_000);
+    tx.moveCall({
+        target: `${LSP_PACKAGE_ID}::pool::add_active_stake`,
+        arguments: [
+            tx.sharedObjectRef({
+                objectId: LSP_POOL_ID,
+                initialSharedVersion: LSP_POOL_INITIAL_SHARED_VERSION,
+                mutable: true,
+            }),
+            tx.sharedObjectRef({
+                objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                initialSharedVersion: 1,
+                mutable: true,
+            }),
+            tx.object(stakedIotaId),
+        ],
+    });
+    return tx;
+}
+
+export function createLspWithdrawTransaction(
+    coinObjectIds: string[],
+    amountNanos: bigint,
+    totalBalanceNanos: bigint,
+) {
+    const tx = new Transaction();
+    tx.setGasBudget(100_000_000); // 0.1 IOTA — withdraw involves internal unstaking
+
+    let coin;
+    if (coinObjectIds.length === 1 && amountNanos === totalBalanceNanos) {
+        // Single coin, full withdrawal — use directly
+        coin = tx.object(coinObjectIds[0]);
+    } else {
+        // Merge all coins into the first, then split exact amount
+        const primary = tx.object(coinObjectIds[0]);
+        if (coinObjectIds.length > 1) {
+            tx.mergeCoins(
+                primary,
+                coinObjectIds.slice(1).map((id) => tx.object(id)),
+            );
+        }
+        if (amountNanos < totalBalanceNanos) {
+            coin = tx.splitCoins(primary, [amountNanos]);
+        } else {
+            coin = primary;
+        }
+    }
+
+    tx.moveCall({
+        target: `${LSP_PACKAGE_ID}::pool::withdraw`,
+        arguments: [
+            tx.sharedObjectRef({
+                objectId: LSP_POOL_ID,
+                initialSharedVersion: LSP_POOL_INITIAL_SHARED_VERSION,
+                mutable: true,
+            }),
+            tx.sharedObjectRef({
+                objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                initialSharedVersion: 1,
+                mutable: true,
+            }),
+            coin,
+        ],
+    });
     return tx;
 }
