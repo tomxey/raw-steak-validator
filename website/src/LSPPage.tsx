@@ -214,6 +214,18 @@ function LSPPage() {
 
     return (
         <main className="main">
+            <div className="card">
+                <h2>rIOTA Liquid Staking</h2>
+                <p className="hint" style={{ marginTop: 0 }}>
+                    <strong>Deposit</strong> — stake your active StakedIota into the pool and receive rIOTA tokens representing your share. The pool earns staking rewards, so rIOTA appreciates over time.
+                </p>
+                <p className="hint" style={{ marginTop: 4 }}>
+                    <strong>Withdraw</strong> — burn rIOTA to receive StakedIota back. The pool drains its lowest-APY vaults first, so you always get the best remaining stakes.
+                </p>
+                <p className="hint" style={{ marginTop: 4, marginBottom: 0 }}>
+                    <strong>Swap</strong> — exchange a high-APY stake for a lower-APY one from the pool. You keep the principal and earn an rIOTA reward proportional to the APY improvement you bring to the pool.
+                </p>
+            </div>
             <PoolStats poolData={poolData} poolValue={poolValue} poolApy={poolApy} />
             {!account ? (
                 <div className="card connect-prompt">
@@ -240,6 +252,7 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
     const [pendingAction, setPendingAction] = useState<string | null>(null);
     const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
     const [swapAmounts, setSwapAmounts] = useState<Record<string, string>>({});
+    const [depositAmounts, setDepositAmounts] = useState<Record<string, string>>({});
 
     const iotaClient = useIotaClient();
     const queryClient = useQueryClient();
@@ -259,10 +272,24 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
             })),
     ) ?? [];
 
-    async function handleDeposit(stakedIotaId: string) {
+    async function handleDeposit(stakedIotaId: string, principalNanos: bigint) {
         setStatus(null);
         setPendingAction(stakedIotaId);
-        const tx = createLspDepositTransaction(stakedIotaId);
+        const raw = depositAmounts[stakedIotaId];
+        const amt = raw ? parseFloat(raw) : NaN;
+        let depositNanos: bigint | null = null;
+        if (!isNaN(amt) && amt > 0) {
+            const nanos = BigInt(Math.floor(amt * 1e9));
+            if (nanos > principalNanos) {
+                setStatus({ type: 'error', msg: 'Amount exceeds stake principal' });
+                setPendingAction(null);
+                return;
+            }
+            if (nanos < principalNanos) {
+                depositNanos = nanos; // partial
+            }
+        }
+        const tx = createLspDepositTransaction(stakedIotaId, depositNanos);
         tx.setSender(address);
         await tx.build({ client: iotaClient });
         signAndExecute(
@@ -366,9 +393,9 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
 
     return (
         <div className="card">
-            <h2>Deposit StakedIota</h2>
+            <h2>Deposit / Swap</h2>
             <p className="hint" style={{ marginTop: 0, marginBottom: 12 }}>
-                Deposit active StakedIota to mint rIOTA. Validators must be added to the pool first.
+                Enter an amount or click MAX, then Deposit or Swap. Validators must be added to the pool first.
             </p>
             {allStakes.length === 0 ? (
                 <p className="hint">You have no active stakes to deposit.</p>
@@ -406,15 +433,36 @@ function DepositSection({ address, poolData }: { address: string; poolData: Pool
                                     </div>
                                 </div>
                                 {isWhitelisted ? (
-                                    <div style={{ display: 'flex', gap: '8px', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                        <button
-                                            className="btn-stake"
-                                            style={{ width: 'auto', padding: '8px 16px', fontSize: '0.85rem' }}
-                                            onClick={() => handleDeposit(stake.stakedIotaId)}
-                                            disabled={pendingAction === stake.stakedIotaId}
-                                        >
-                                            {pendingAction === stake.stakedIotaId ? 'Signing...' : 'Deposit'}
-                                        </button>
+                                    <div style={{ display: 'flex', gap: '6px', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                                            <input
+                                                type="number"
+                                                placeholder="IOTA"
+                                                value={depositAmounts[stake.stakedIotaId] ?? ''}
+                                                onChange={(e) => setDepositAmounts((prev) => ({ ...prev, [stake.stakedIotaId]: e.target.value }))}
+                                                style={{ width: '80px', padding: '6px 8px', fontSize: '0.8rem' }}
+                                                min={1}
+                                                step="0.1"
+                                            />
+                                            <button
+                                                className="btn-max"
+                                                style={{ padding: '6px 8px', fontSize: '0.75rem' }}
+                                                onClick={() => setDepositAmounts((prev) => ({
+                                                    ...prev,
+                                                    [stake.stakedIotaId]: (Number(stake.principal) / 1e9).toString(),
+                                                }))}
+                                            >
+                                                MAX
+                                            </button>
+                                            <button
+                                                className="btn-stake"
+                                                style={{ width: 'auto', padding: '6px 12px', fontSize: '0.8rem' }}
+                                                onClick={() => handleDeposit(stake.stakedIotaId, BigInt(stake.principal))}
+                                                disabled={pendingAction === stake.stakedIotaId}
+                                            >
+                                                {pendingAction === stake.stakedIotaId ? 'Signing...' : 'Deposit'}
+                                            </button>
+                                        </div>
                                         <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
                                             <input
                                                 type="number"

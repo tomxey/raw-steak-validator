@@ -53,9 +53,6 @@ function App() {
                     <NavLink to="/optimize" className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
                         {admin ? 'Optimizer' : 'Validators'}
                     </NavLink>
-                    <NavLink to="/lsp" className={({ isActive }) => `nav-btn ${isActive ? 'nav-active' : ''}`}>
-                        LSP
-                    </NavLink>
                 </nav>
             </header>
 
@@ -79,7 +76,7 @@ function App() {
                     }
                 />
                 <Route path="/optimize" element={<OptimizerPage />} />
-                <Route path="/lsp" element={<LSPPage />} />
+                <Route path="/riota" element={<LSPPage />} />
             </Routes>
 
             <footer className="footer">

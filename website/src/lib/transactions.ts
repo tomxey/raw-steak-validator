@@ -77,9 +77,24 @@ export function createRestakeTransaction(
     return tx;
 }
 
-export function createLspDepositTransaction(stakedIotaId: string) {
+export function createLspDepositTransaction(
+    stakedIotaId: string,
+    depositAmountNanos: bigint | null,
+) {
     const tx = new Transaction();
     tx.setGasBudget(50_000_000);
+
+    let stakeArg;
+    if (depositAmountNanos !== null) {
+        // Partial deposit: split off the deposit amount
+        stakeArg = tx.moveCall({
+            target: '0x3::staking_pool::split',
+            arguments: [tx.object(stakedIotaId), tx.pure.u64(depositAmountNanos)],
+        });
+    } else {
+        stakeArg = tx.object(stakedIotaId);
+    }
+
     tx.moveCall({
         target: `${LSP_PACKAGE_ID}::pool::add_active_stake`,
         arguments: [
@@ -93,7 +108,7 @@ export function createLspDepositTransaction(stakedIotaId: string) {
                 initialSharedVersion: 1,
                 mutable: true,
             }),
-            tx.object(stakedIotaId),
+            stakeArg,
         ],
     });
     return tx;
