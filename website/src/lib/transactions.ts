@@ -145,3 +145,26 @@ export function createLspWithdrawTransaction(
     });
     return tx;
 }
+
+export function createAddValidatorTransaction(validatorAddress: string, stakingPoolId: string) {
+    const tx = new Transaction();
+    tx.setGasBudget(50_000_000);
+    tx.moveCall({
+        target: `${LSP_PACKAGE_ID}::pool::add_validator_open`,
+        arguments: [
+            tx.sharedObjectRef({
+                objectId: LSP_POOL_ID,
+                initialSharedVersion: LSP_POOL_INITIAL_SHARED_VERSION,
+                mutable: true,
+            }),
+            tx.sharedObjectRef({
+                objectId: IOTA_SYSTEM_STATE_OBJECT_ID,
+                initialSharedVersion: 1,
+                mutable: true,
+            }),
+            tx.pure.address(validatorAddress),
+            tx.pure.id(stakingPoolId),
+        ],
+    });
+    return tx;
+}
