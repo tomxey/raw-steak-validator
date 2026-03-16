@@ -136,10 +136,11 @@ function usePoolApy() {
             for (let i = bytes.length - 1; i >= 0; i--) {
                 raw = (raw << 8n) | BigInt(bytes[i]);
             }
-            // raw is per-epoch yield scaled by YIELD_PRECISION (1e18)
-            // Annualize: APY% ≈ per_epoch_yield × 365 × 100
+            // raw is a growth factor over 7 epochs, scaled by YIELD_PRECISION (1e18).
+            // 1e18 = 1× (0% yield). Annualize: APY% = (growth - 1) / 7 × 365 × 100
             const YIELD_PRECISION = 1_000_000_000_000_000_000n;
-            return Number(raw * 36500n) / Number(YIELD_PRECISION);
+            if (raw <= YIELD_PRECISION) return 0;
+            return Number((raw - YIELD_PRECISION) * 36500n) / Number(YIELD_PRECISION * 7n);
         },
         staleTime: 60_000,
     });

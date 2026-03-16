@@ -12,7 +12,7 @@ export const VALIDATOR_INNER_ID =
 
 // LSP (Liquid Staking Pool) constants
 export const LSP_ORIGINAL_PACKAGE_ID = '0x33bb7e4d03df9224a5c1d5fcd7260f2940de81f6a8f40fcd9e2b7917fb15abd5';
-export const LSP_PACKAGE_ID = '0x2a3e503684f057984dbe3f1d29731dfa03844c012fefc692770b2a2438f14dcd'; // v3
+export const LSP_PACKAGE_ID = '0x14beb9929489239e6191d8649b4f09c31136206459a10ddcf834adacf534a581'; // v4
 export const LSP_POOL_ID = '0xd789379a9fc8c6f220f4810a64341191a3fab751aa4da8928889cd84264bfafe';
 export const LSP_POOL_INITIAL_SHARED_VERSION = 483851920;
 export const RIOTA_COIN_TYPE = `${LSP_ORIGINAL_PACKAGE_ID}::riota::RIOTA`;

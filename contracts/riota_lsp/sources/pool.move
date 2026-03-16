@@ -433,8 +433,8 @@ module raw_steak::pool {
         let validator_x = validator_for_stake(pool, system, &stake_x);
         let value_x = compute_stake_value(pool, system, validator_x, principal_x, epoch_x);
 
-        // Snapshot BEFORE.
-        let apy_before        = pool_weighted_median_yield(pool, system, current_epoch);
+        // Snapshot BEFORE: pool-wide weighted APY score (growth factor over APY_WINDOW).
+        let score_before      = pool_weighted_apy_score(pool);
         let pool_value_before = total_pool_value(pool);
 
         // 1. DEPOSIT: stake → rIOTA.
@@ -443,19 +443,20 @@ module raw_steak::pool {
         // 2. WITHDRAW: rIOTA → stakes from worst-APY vaults.
         let (result, mut refund, _, _) = drain_and_burn(pool, system, riota, ctx);
 
-        // Snapshot AFTER.
-        let apy_after        = pool_weighted_median_yield(pool, system, current_epoch);
-        assert!(apy_after > apy_before, ENoImprovement);
+        // Snapshot AFTER: score should have improved.
+        let score_after      = pool_weighted_apy_score(pool);
+        assert!(score_after > score_before, ENoImprovement);
         let pool_value_after = total_pool_value(pool) as u256;
 
-        // 3. REWARD: expected 7-day pool earnings improvement.
-        //   earn_before = pool_value_before × APY_WINDOW × apy_before / YIELD_PRECISION
-        //   earn_after  = pool_value_after  × APY_WINDOW × apy_after  / YIELD_PRECISION
+        // 3. REWARD: 7-day pool earnings improvement from APY uplift.
+        //   CachedApyScore is a growth factor over APY_WINDOW epochs:
+        //     score = 1e18 means 1× (0% growth), score > 1e18 means positive yield.
+        //   earn = pool_value × (score − YIELD_PRECISION) / YIELD_PRECISION
         //   improvement = earn_after − earn_before
         //   reward_riota = improvement × riota_supply / pool_value_after
         let riota_supply = coin::total_supply(&pool.treasury_cap) as u256;
-        let earn_before  = (pool_value_before as u256) * (APY_WINDOW as u256) * apy_before;
-        let earn_after   = pool_value_after * (APY_WINDOW as u256) * apy_after;
+        let earn_before  = (pool_value_before as u256) * (score_before - YIELD_PRECISION);
+        let earn_after   = pool_value_after * (score_after - YIELD_PRECISION);
         let improvement  = (earn_after - earn_before) / YIELD_PRECISION;
         let reward_amount = if (pool_value_after > 0) {
             (improvement * riota_supply / pool_value_after) as u64
@@ -478,7 +479,8 @@ module raw_steak::pool {
     public fun riota_supply(pool: &Pool): u64 { coin::total_supply(&pool.treasury_cap) }
     public fun validators(pool: &Pool): &vector<address> { &pool.validators }
 
-    /// Pool-wide weighted median per-epoch yield (scaled by YIELD_PRECISION = 1e18).
+    /// Pool-wide weighted APY score: growth factor over APY_WINDOW epochs,
+    /// scaled by YIELD_PRECISION (1e18 = 1× = 0% yield).
     /// Call via devInspectTransactionBlock for a read-only view.
     public fun pool_apy(
         pool: &mut Pool,
@@ -486,7 +488,7 @@ module raw_steak::pool {
         ctx: &TxContext,
     ): u256 {
         refresh_rates(pool, system, ctx.epoch());
-        pool_weighted_median_yield(pool, system, ctx.epoch())
+        pool_weighted_apy_score(pool)
     }
 
     // ===== Internal helpers =====
@@ -648,13 +650,11 @@ module raw_steak::pool {
         if (total > MAX_U64) { MAX_U64 as u64 } else { total as u64 }
     }
 
-    /// Weighted average of per-validator median yields, weighted by vault IOTA value.
-    /// Returns the pool's aggregate per-epoch yield scaled by YIELD_PRECISION.
-    fun pool_weighted_median_yield(
-        pool: &Pool,
-        system: &mut IotaSystemState,
-        current_epoch: u64,
-    ): u256 {
+    /// Weighted average of cached APY scores, weighted by vault IOTA value.
+    /// Returns the pool's aggregate growth factor over APY_WINDOW epochs,
+    /// scaled by YIELD_PRECISION. Uses scores cached by `refresh_rates` —
+    /// only reads dynamic fields, no exchange-rate-table lookups.
+    fun pool_weighted_apy_score(pool: &Pool): u256 {
         let mut total_weight: u256 = 0;
         let mut weighted_sum: u256 = 0;
         let mut i = 0;
@@ -670,13 +670,16 @@ module raw_steak::pool {
                 }
             } else { 0 };
             if (vault_value > 0) {
-                let yield_v = median_yield(system, vault.pool_id, current_epoch);
-                weighted_sum = weighted_sum + vault_value * yield_v;
+                let sk = CachedApyScoreKey { validator: v };
+                let score = if (dynamic_field::exists_(&pool.id, sk)) {
+                    *dynamic_field::borrow(&pool.id, sk)
+                } else { YIELD_PRECISION }; // no score = 1x growth = 0% yield
+                weighted_sum = weighted_sum + vault_value * score;
                 total_weight = total_weight + vault_value;
             };
             i = i + 1;
         };
-        if (total_weight == 0) { 0 } else { weighted_sum / total_weight }
+        if (total_weight == 0) { YIELD_PRECISION } else { weighted_sum / total_weight }
     }
 
     /// Add a stake to its validator's vault. Merges with the last entry if

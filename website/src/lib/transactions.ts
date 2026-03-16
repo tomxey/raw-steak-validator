@@ -151,7 +151,7 @@ export function createLspSwapTransaction(
     swapAmountNanos: bigint | null,
 ) {
     const tx = new Transaction();
-    tx.setGasBudget(500_000_000); // 0.5 IOTA — swap does deposit+withdraw+2x APY computation
+    tx.setGasBudget(100_000_000); // 0.1 IOTA — swap does deposit+withdraw+APY check
 
     const pool = tx.sharedObjectRef({
         objectId: LSP_POOL_ID,
