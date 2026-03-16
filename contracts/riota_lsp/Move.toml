@@ -1,0 +1,11 @@
+[package]
+name = "raw_steak_lsp"
+edition = "2024"
+
+[dependencies]
+MoveStdlib = { local = "../../../iota/crates/iota-framework/packages/move-stdlib" }
+Iota = { local = "../../../iota/crates/iota-framework/packages/iota-framework" }
+IotaSystem = { local = "../../../iota/crates/iota-framework/packages/iota-system" }
+
+[addresses]
+raw_steak = "0x0"
