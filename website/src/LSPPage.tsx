@@ -77,13 +77,17 @@ function usePoolValue(poolData: PoolData | undefined) {
                     const rateFields = (rateRes.data?.content as AnyFields)?.fields?.value
                         ?.fields;
 
-                    if (!vaultFields || !rateFields) return 0n;
+                    if (!vaultFields) return 0n;
+
+                    // Candidate validators have no CachedRate (no exchange rate history).
+                    // Their rate is 1:1, so total_staked == IOTA value.
+                    if (!rateFields) return BigInt(vaultFields.total_staked ?? '0');
 
                     const totalPoolTokens = BigInt(vaultFields.total_pool_tokens ?? '0');
                     const iotaAmount = BigInt(rateFields.iota_amount ?? '0');
                     const poolTokenAmount = BigInt(rateFields.pool_token_amount ?? '0');
 
-                    if (poolTokenAmount === 0n) return 0n;
+                    if (poolTokenAmount === 0n) return BigInt(vaultFields.total_staked ?? '0');
                     return (totalPoolTokens * iotaAmount) / poolTokenAmount;
                 }),
             );
